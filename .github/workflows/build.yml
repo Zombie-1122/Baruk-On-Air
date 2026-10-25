@@ -1,0 +1,53 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # First time only: if you uploaded project.zip, unpack it into the repo.
+      - name: Unpack project.zip
+        run: |
+          if [ -f project.zip ]; then
+            unzip -o -q project.zip
+            rm project.zip
+            git config user.name "build-bot"
+            git config user.email "build-bot@users.noreply.github.com"
+            git add -A
+            git commit -m "Unpack project" || true
+            git push || true
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Build
+        run: |
+          F=$(find . -name settings.gradle.kts -not -path './.git/*' | head -1)
+          echo "Found: $F"
+          cd "$(dirname "$F")"
+          gradle assembleRelease -PvCode=${{ github.run_number }} --no-daemon
+
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: BarukOnAir build ${{ github.run_number }}
+          body: ${{ github.event.head_commit.message }}
+          files: '**/build/outputs/apk/release/app-release.apk'
+          
