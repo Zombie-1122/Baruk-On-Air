@@ -51,6 +51,11 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     var checking by mutableStateOf(false)
         private set
 
+    var sort by mutableStateOf(store.sort())
+        private set
+    var plays by mutableStateOf(store.plays())
+        private set
+
     var epg by mutableStateOf(EpgIndex.EMPTY)
         private set
     var epgBusy by mutableStateOf(false)
@@ -74,16 +79,21 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         store.saveEngine(e)
     }
 
-    fun saveRepoSlug(r: String) {
-        repo = r.trim()
-        store.saveRepo(repo)
-        checkUpdate()
+    fun chooseSort(s: Sort) {
+        sort = s
+        store.saveSort(s)
+    }
+
+    /** Called after a channel has actually been watched for a few seconds (drives "Frequency" sort). */
+    fun watched(c: Channel) {
+        plays = plays + (c.url to ((plays[c.url] ?: 0) + 1))
+        store.savePlays(plays)
     }
 
     fun checkUpdate() {
         val r = repo.trim()
         if (!r.contains('/')) {
-            updateStatus = "Enter your GitHub repo as owner/name to enable update checks"
+            updateStatus = "Update check is not available in this build"
             return
         }
         viewModelScope.launch {
@@ -113,7 +123,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
             for (pl in pls) {
                 val f = store.file(pl.id)
                 if (f.exists()) {
-                    runCatching { M3uParser.parseFile(f) }.getOrNull()?.let { acc.addAll(it) }
+                    runCatching { M3uParser.parseFile(f, pl.name, acc.size + 1) }.getOrNull()?.let { acc.addAll(it) }
                 }
             }
             acc

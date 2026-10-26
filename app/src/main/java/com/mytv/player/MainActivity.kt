@@ -15,7 +15,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +29,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -44,6 +42,8 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
@@ -93,6 +93,7 @@ class MainActivity : ComponentActivity() {
                     onSurface = Txt,
                     onBackground = Txt,
                     surfaceVariant = Color(0xFF1B2433),
+                    surfaceContainer = Color(0xFF172131),
                     surfaceContainerHigh = Color(0xFF172131),
                     secondaryContainer = Sel,
                 )
@@ -122,11 +123,15 @@ fun openExternal(ctx: Context, ch: Channel) {
 fun App(vm: MainVm = viewModel()) {
     val ctx = LocalContext.current
     var screen by rememberSaveable { mutableStateOf("home") }
-    var seriesName by rememberSaveable { mutableStateOf("") }
     var playing by remember { mutableStateOf<PlayRequest?>(null) }
 
     fun play(list: List<Channel>, i: Int) {
-        if (vm.engine == "external") openExternal(ctx, list[i]) else playing = PlayRequest(list, i)
+        if (vm.engine == "external") {
+            openExternal(ctx, list[i])
+            vm.watched(list[i])
+        } else {
+            playing = PlayRequest(list, i)
+        }
     }
 
     val p = playing
@@ -140,6 +145,7 @@ fun App(vm: MainVm = viewModel()) {
             onFav = { vm.toggleFavorite(it) },
             onClose = { playing = null },
             onExternal = { openExternal(ctx, it) },
+            onWatched = { vm.watched(it) },
         )
         return
     }
@@ -154,15 +160,10 @@ fun App(vm: MainVm = viewModel()) {
                 BackHandler { screen = "settings" }
                 PlaylistsScreen(vm, onBack = { screen = "settings" })
             }
-            "series" -> {
-                BackHandler { screen = "home" }
-                SeriesScreen(vm, seriesName, onBack = { screen = "home" }, onPlay = { l, i -> play(l, i) })
-            }
             else -> HomeScreen(
                 vm,
                 onPlay = { l, i -> play(l, i) },
                 onSettings = { screen = "settings" },
-                onOpenSeries = { seriesName = it; screen = "series" },
             )
         }
     }
@@ -172,17 +173,13 @@ fun App(vm: MainVm = viewModel()) {
 
 private const val FAV = "\u0001fav"
 
-private val TABS = listOf(Kind.LIVE to "Live", Kind.MOVIE to "VOD", Kind.SERIES to "Series", Kind.RADIO to "Radio")
-
-/** One line in the middle list: a channel/movie/station, or a whole series. */
-private class Entry(val title: String, val sub: String, val logo: String?, val ch: Channel?, val series: String?)
+private val TABS = listOf(Kind.LIVE to "Live", Kind.RADIO to "Radio")
 
 @Composable
 fun HomeScreen(
     vm: MainVm,
     onPlay: (List<Channel>, Int) -> Unit,
     onSettings: () -> Unit,
-    onOpenSeries: (String) -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var searching by rememberSaveable { mutableStateOf(false) }
@@ -191,8 +188,9 @@ fun HomeScreen(
     var sel by remember { mutableIntStateOf(0) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val snack = remember { SnackbarHostState() }
-    val wide = LocalConfiguration.current.screenWidthDp >= 720
+    val showTitle = LocalConfiguration.current.screenWidthDp >= 760
     val kind = TABS[tab].first
+    val sort = vm.sort
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -206,30 +204,27 @@ fun HomeScreen(
             vm.message = null
         }
     }
-    LaunchedEffect(tab, cat, query) { sel = 0 }
+    LaunchedEffect(tab, cat, query, sort) { sel = 0 }
     BackHandler(enabled = searching) { searching = false; query = "" }
 
     val ofKind = remember(vm.channels, kind) { vm.channels.filter { it.kind == kind } }
-    val groups = remember(ofKind) { ofKind.map { it.group }.distinct() }
-    val entries = remember(ofKind, vm.favorites, cat, query, kind) {
+    val groups = remember(ofKind, sort) {
+        val g = ofKind.map { it.group }.distinct()
+        if (sort == Sort.CATEGORY) g.sortedWith(String.CASE_INSENSITIVE_ORDER) else g
+    }
+    val entries = remember(ofKind, vm.favorites, cat, query, sort, vm.plays) {
         val base = ofKind.filter {
             (cat.isEmpty() || (cat == FAV && it.url in vm.favorites) || it.group == cat) &&
                 (query.isBlank() || it.name.contains(query, ignoreCase = true))
         }
-        if (kind == Kind.SERIES) {
-            base.groupBy { it.series ?: it.group }.map { (n, eps) ->
-                Entry(n, "${eps.size} episodes", eps.firstOrNull { it.logo != null }?.logo, null, n)
-            }
-        } else {
-            base.map { Entry(it.name, it.group, it.logo, it, null) }
+        // every sort is stable, so ties keep the playlist order
+        when (sort) {
+            Sort.NUMBER -> base.sortedBy { if (it.number > 0) it.number else Int.MAX_VALUE }
+            Sort.NAME -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            Sort.CATEGORY -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.group })
+            Sort.PROVIDER -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.source })
+            Sort.FREQUENCY -> base.sortedByDescending { vm.plays[it.url] ?: 0 }
         }
-    }
-    val chans = remember(entries) { entries.mapNotNull { it.ch } }
-
-    fun activate(i: Int) {
-        val e = entries.getOrNull(i) ?: return
-        val s = e.series
-        if (s != null) onOpenSeries(s) else onPlay(chans, i)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -241,9 +236,7 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Image(painterResource(R.drawable.logo_mark), null, Modifier.size(38.dp))
-                if (searching) {
-                    SearchField(query, { query = it }, Modifier.weight(1f))
-                } else {
+                if (showTitle) {
                     Text(
                         "BarukOnAir",
                         fontSize = 18.sp,
@@ -251,13 +244,13 @@ fun HomeScreen(
                         maxLines = 1,
                         modifier = Modifier.padding(horizontal = 4.dp),
                     )
-                    if (wide) {
-                        Spacer(Modifier.width(12.dp))
-                        Tabs(tab) { tab = it; cat = "" }
-                    }
+                }
+                Tabs(tab) { tab = it; cat = "" }
+                if (searching) {
+                    SearchField(query, { query = it }, Modifier.weight(1f).padding(start = 8.dp))
+                } else {
                     Spacer(Modifier.weight(1f))
                 }
-                if (searching && wide) Tabs(tab) { tab = it; cat = "" }
                 IconBtn(
                     if (searching) Icons.Default.Close else Icons.Default.Search,
                     "Search",
@@ -265,11 +258,6 @@ fun HomeScreen(
                 )
                 IconBtn(Icons.Default.Refresh, "Update playlists and guide", { vm.refreshAll() })
                 IconBtn(Icons.Default.Settings, "Settings", onSettings, badge = vm.update != null)
-            }
-            if (!wide) {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
-                ) { Tabs(tab) { tab = it; cat = "" } }
             }
             if (vm.busy || vm.epgBusy) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Accent, trackColor = Color.Transparent)
@@ -280,7 +268,7 @@ fun HomeScreen(
             // ---- body ----
             if (vm.channels.isEmpty()) {
                 EmptyState(vm.busy, onSettings)
-            } else if (wide) {
+            } else {
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     LazyColumn(
                         Modifier.weight(0.22f).fillMaxHeight(),
@@ -291,82 +279,57 @@ fun HomeScreen(
                         items(groups, key = { it }) { g -> CategoryItem(g, cat == g) { cat = g } }
                     }
                     VDivider()
-                    if (entries.isEmpty()) {
-                        Box(Modifier.weight(0.78f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-                            Text(if (cat == FAV) "No favorites here yet" else "Nothing found", color = Dim)
-                        }
-                    } else {
-                        LazyColumn(
-                            Modifier.weight(0.40f).fillMaxHeight(),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    Column(Modifier.weight(0.40f).fillMaxHeight()) {
+                        Row(
+                            Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            itemsIndexed(entries) { i, e ->
-                                val rowCh = e.ch
-                                val cur = if (kind == Kind.LIVE && rowCh != null) vm.epg.of(rowCh).nowAt(now) else null
-                                ListRow(
-                                    e = e,
-                                    selected = sel == i,
-                                    subtitle = if (kind == Kind.LIVE) (cur?.title ?: "No programme info") else e.sub,
-                                    progress = cur?.let { (now - it.start).toFloat() / (it.stop - it.start).coerceAtLeast(1) },
-                                    fav = e.ch?.url in vm.favorites,
-                                    showHeart = false,
-                                    onFocus = { if (it) sel = i },
-                                    onClick = { if (sel == i) activate(i) else sel = i },
-                                    onLong = { e.ch?.let { vm.toggleFavorite(it) } },
-                                    onFav = {},
-                                )
+                            Text(
+                                "${entries.size} " + if (kind == Kind.RADIO) "stations" else "channels",
+                                color = Dim,
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                            SortMenu(sort) { vm.chooseSort(it) }
+                        }
+                        if (entries.isEmpty()) {
+                            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                Text(if (cat == FAV) "No favorites here yet" else "Nothing found", color = Dim)
+                            }
+                        } else {
+                            LazyColumn(
+                                Modifier.weight(1f).fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            ) {
+                                itemsIndexed(entries) { i, ch ->
+                                    val cur = if (kind == Kind.LIVE) vm.epg.of(ch).nowAt(now) else null
+                                    ListRow(
+                                        ch = ch,
+                                        selected = sel == i,
+                                        number = if (sort == Sort.NUMBER) ch.number else 0,
+                                        subtitle = if (kind == Kind.LIVE) (cur?.title ?: "No programme info") else ch.group,
+                                        progress = cur?.let { (now - it.start).toFloat() / (it.stop - it.start).coerceAtLeast(1) },
+                                        fav = ch.url in vm.favorites,
+                                        onFocus = { if (it) sel = i },
+                                        onClick = { if (sel == i) onPlay(entries, i) else sel = i },
+                                        onLong = { vm.toggleFavorite(ch) },
+                                    )
+                                }
                             }
                         }
-                        VDivider()
-                        val picked = entries.getOrNull(sel.coerceIn(0, entries.lastIndex))
-                        val pickedCh = picked?.ch
-                        Detail(
-                            e = picked,
-                            kind = kind,
-                            progs = if (pickedCh != null && kind == Kind.LIVE) vm.epg.of(pickedCh) else emptyList(),
-                            now = now,
-                            fav = pickedCh?.url in vm.favorites,
-                            onFav = { pickedCh?.let { vm.toggleFavorite(it) } },
-                            onOpen = { activate(sel.coerceIn(0, entries.lastIndex)) },
-                            modifier = Modifier.weight(0.38f).fillMaxHeight(),
-                        )
                     }
-                }
-            } else {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    item { Chip("All", cat.isEmpty()) { cat = "" } }
-                    item { Chip("Favorites", cat == FAV) { cat = FAV } }
-                    items(groups, key = { it }) { g -> Chip(g, cat == g) { cat = g } }
-                }
-                if (entries.isEmpty()) {
-                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text(if (cat == FAV) "No favorites here yet" else "Nothing found", color = Dim)
-                    }
-                } else {
-                    LazyColumn(
-                        Modifier.weight(1f).fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    ) {
-                        itemsIndexed(entries) { i, e ->
-                            val rowCh = e.ch
-                            val cur = if (kind == Kind.LIVE && rowCh != null) vm.epg.of(rowCh).nowAt(now) else null
-                            ListRow(
-                                e = e,
-                                selected = false,
-                                subtitle = if (kind == Kind.LIVE) (cur?.title ?: "No programme info") else e.sub,
-                                progress = cur?.let { (now - it.start).toFloat() / (it.stop - it.start).coerceAtLeast(1) },
-                                fav = e.ch?.url in vm.favorites,
-                                showHeart = e.ch != null,
-                                onFocus = {},
-                                onClick = { activate(i) },
-                                onLong = { e.ch?.let { vm.toggleFavorite(it) } },
-                                onFav = { e.ch?.let { vm.toggleFavorite(it) } },
-                            )
-                        }
-                    }
+                    VDivider()
+                    val picked = entries.getOrNull(sel.coerceIn(0, (entries.size - 1).coerceAtLeast(0)))
+                    Detail(
+                        ch = picked,
+                        kind = kind,
+                        progs = if (picked != null && kind == Kind.LIVE) vm.epg.of(picked) else emptyList(),
+                        now = now,
+                        fav = picked != null && picked.url in vm.favorites,
+                        onFav = { picked?.let { vm.toggleFavorite(it) } },
+                        onOpen = { if (picked != null) onPlay(entries, entries.indexOf(picked)) },
+                        modifier = Modifier.weight(0.38f).fillMaxHeight(),
+                    )
                 }
             }
         }
@@ -376,8 +339,30 @@ fun HomeScreen(
 
 @Composable
 private fun Tabs(current: Int, onSelect: (Int) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 8.dp)) {
         TABS.forEachIndexed { i, t -> Pill(t.second, current == i, { onSelect(i) }) }
+    }
+}
+
+@Composable
+private fun SortMenu(current: Sort, onPick: (Sort) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Pill("Sort: ${current.short}", false, { open = true })
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            for (s in Sort.entries) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            s.label,
+                            color = if (s == current) Color(0xFF6FA8F0) else Txt,
+                            fontWeight = if (s == current) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                    },
+                    onClick = { onPick(s); open = false },
+                )
+            }
+        }
     }
 }
 
@@ -458,35 +443,16 @@ private fun CategoryItem(label: String, selected: Boolean, onClick: () -> Unit) 
 }
 
 @Composable
-private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(50)
-    Box(
-        Modifier
-            .height(32.dp)
-            .clip(shape)
-            .background(if (selected) Sel else Color(0x22FFFFFF))
-            .then(if (selected) Modifier.border(1.dp, SelBorder, shape) else Modifier)
-            .tvFocus(shape)
-            .combinedClickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, fontSize = 13.sp, maxLines = 1, color = if (selected) Color.White else Txt.copy(alpha = 0.85f))
-    }
-}
-
-@Composable
 private fun ListRow(
-    e: Entry,
+    ch: Channel,
     selected: Boolean,
+    number: Int,
     subtitle: String,
     progress: Float?,
     fav: Boolean,
-    showHeart: Boolean,
     onFocus: (Boolean) -> Unit,
     onClick: () -> Unit,
     onLong: () -> Unit,
-    onFav: () -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
     Row(
@@ -501,10 +467,19 @@ private fun ListRow(
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Logo(e.logo, e.title, 48.dp)
+        if (number > 0) {
+            Text(
+                number.toString(),
+                color = Dim,
+                fontSize = 12.sp,
+                maxLines = 1,
+                modifier = Modifier.width(34.dp),
+            )
+        }
+        Logo(ch.logo, ch.name, 48.dp)
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(
-                e.title,
+                ch.name,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -520,22 +495,13 @@ private fun ListRow(
             )
             if (progress != null) Bar(progress, Modifier.padding(top = 6.dp))
         }
-        if (showHeart) {
-            IconBtn(
-                if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                "Favorite",
-                onFav,
-                tint = if (fav) Heart else Dim,
-            )
-        } else if (fav) {
-            Icon(Icons.Default.Favorite, null, tint = Heart, modifier = Modifier.size(16.dp))
-        }
+        if (fav) Icon(Icons.Default.Favorite, null, tint = Heart, modifier = Modifier.size(16.dp))
     }
 }
 
 @Composable
 private fun Detail(
-    e: Entry?,
+    ch: Channel?,
     kind: Kind,
     progs: List<Programme>,
     now: Long,
@@ -545,39 +511,38 @@ private fun Detail(
     modifier: Modifier,
 ) {
     Column(modifier.padding(horizontal = 20.dp, vertical = 14.dp).verticalScroll(rememberScrollState())) {
-        if (e != null) {
+        if (ch != null) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (kind == Kind.LIVE || kind == Kind.RADIO) Logo(e.logo, e.title, 64.dp)
+                Logo(ch.logo, ch.name, 64.dp)
                 Column(Modifier.weight(1f)) {
                     Text(
-                        e.title,
+                        ch.name,
                         fontSize = 20.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(e.ch?.group ?: e.sub, color = Dim, fontSize = 13.sp, maxLines = 1)
-                }
-                if (e.ch != null) {
-                    IconBtn(
-                        if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        "Favorite",
-                        onFav,
-                        tint = if (fav) Heart else Dim,
+                    Text(
+                        if (ch.source.isNotEmpty()) "${ch.group}  |  ${ch.source}" else ch.group,
+                        color = Dim,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Pill(if (e.series != null) "Open" else "Watch", true, onOpen)
-            }
-
-            if (kind == Kind.MOVIE || kind == Kind.SERIES) {
-                Spacer(Modifier.height(16.dp))
-                Logo(e.logo, e.title, 210.dp, fit = false, width = 140.dp)
+                IconBtn(
+                    if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    "Favorite",
+                    onFav,
+                    tint = if (fav) Heart else Dim,
+                )
+                Pill("Watch", true, onOpen)
             }
 
             if (kind == Kind.LIVE) {
                 Spacer(Modifier.height(24.dp))
                 Text(
-                    "EPG DETAILS  ${e.title}".uppercase(),
+                    "EPG DETAILS  ${ch.name}".uppercase(),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.8.sp,
@@ -610,53 +575,6 @@ private fun Detail(
                             Text(p.title, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------------ series
-
-@Composable
-fun SeriesScreen(vm: MainVm, name: String, onBack: () -> Unit, onPlay: (List<Channel>, Int) -> Unit) {
-    val eps = remember(vm.channels, name) {
-        vm.channels
-            .filter { it.kind == Kind.SERIES && (it.series ?: it.group) == name }
-            .sortedWith(compareBy<Channel>({ it.season }, { it.episode }))
-    }
-    ScreenFrame(name, onBack) {
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
-            var last = -1
-            eps.forEachIndexed { i, e ->
-                if (e.season != last) {
-                    last = e.season
-                    if (e.season > 0) {
-                        item {
-                            Text(
-                                "SEASON ${e.season}",
-                                modifier = Modifier.padding(start = 6.dp, top = 14.dp, bottom = 4.dp),
-                                color = Color(0xFF6FA8F0),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.8.sp,
-                            )
-                        }
-                    }
-                }
-                item {
-                    ListRow(
-                        e = Entry(e.name, e.group, e.logo, e, null),
-                        selected = false,
-                        subtitle = if (e.season > 0) "S${e.season} E${e.episode}" else e.group,
-                        progress = null,
-                        fav = e.url in vm.favorites,
-                        showHeart = true,
-                        onFocus = {},
-                        onClick = { onPlay(eps, i) },
-                        onLong = { vm.toggleFavorite(e) },
-                        onFav = { vm.toggleFavorite(e) },
-                    )
                 }
             }
         }

@@ -7,7 +7,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
-import android.net.Uri
+import android.util.Base64
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -63,15 +63,23 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
+import androidx.media3.exoplayer.drm.DrmSessionManager
+import androidx.media3.exoplayer.drm.FrameworkMediaDrm
+import androidx.media3.exoplayer.drm.LocalMediaDrmCallback
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -120,11 +128,11 @@ fun PlayerScreen(
     onFav: (Channel) -> Unit,
     onClose: () -> Unit,
     onExternal: (Channel) -> Unit,
+    onWatched: (Channel) -> Unit,
 ) {
     val ctx = LocalContext.current
     val view = LocalView.current
     val activity = remember { ctx.findActivity() }
-    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, channels.lastIndex)) }
     var controls by remember { mutableStateOf(true) }
@@ -132,7 +140,7 @@ fun PlayerScreen(
     val st = remember { PlayState() }
     val focus = remember { FocusRequester() }
     val ch = channels[index]
-    val isVod = ch.kind == Kind.MOVIE || ch.kind == Kind.SERIES
+    val isVod = st.dur > 0L // known duration = recorded video; live streams report 0
 
     fun go(i: Int) {
         st.forceHls = false
@@ -147,6 +155,12 @@ fun PlayerScreen(
         val target = (st.pos + deltaMs).coerceAtLeast(0L)
         st.seek?.invoke(if (st.dur > 0) target.coerceAtMost(st.dur) else target)
         tick++
+    }
+
+    // count it as "watched" (for Frequency sort) only after a few seconds, so channel surfing doesn't count
+    LaunchedEffect(ch.url) {
+        delay(8000)
+        onWatched(ch)
     }
 
     // auto-hide controls
@@ -175,7 +189,6 @@ fun PlayerScreen(
         onDispose {
             ic?.show(WindowInsetsCompat.Type.systemBars())
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -343,14 +356,6 @@ fun PlayerScreen(
                             st.resizeIdx = (st.resizeIdx + 1) % 3
                             tick++
                         }) { Text("Zoom", color = Color.White) }
-                        TextButton(onClick = {
-                            activity?.requestedOrientation = if (landscape) {
-                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                            } else {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            }
-                            tick++
-                        }) { Text("Rotate", color = Color.White) }
                         TextButton(onClick = { onExternal(ch) }) { Text("Open in app", color = Color.White) }
                     }
                 }
@@ -360,6 +365,70 @@ fun PlayerScreen(
 }
 
 // ---------------------------------------------------------------- Built-in (Media3 / ExoPlayer)
+
+private val HEX32 = Regex("^[0-9a-fA-F]{32}$")
+
+/** "kid" or "key" as 32 hex chars -> base64url (what a ClearKey JWK wants). Anything else is passed through. */
+private fun jwkValue(v: String): String {
+    if (!HEX32.matches(v)) return v
+    val bytes = ByteArray(16) { v.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+    return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+}
+
+/**
+ * #KODIPROP license_key for ClearKey is either a ready JSON ({"keys":[...]}) or "kid:key" (hex),
+ * several pairs separated by commas.
+ */
+private fun clearKeyJson(raw: String): ByteArray? {
+    val t = raw.trim()
+    if (t.startsWith("{")) return t.toByteArray()
+    val pairs = t.split(',').mapNotNull { p ->
+        val kv = p.trim().split(':')
+        if (kv.size == 2 && kv[0].isNotBlank() && kv[1].isNotBlank()) jwkValue(kv[0].trim()) to jwkValue(kv[1].trim()) else null
+    }
+    if (pairs.isEmpty()) return null
+    val sb = StringBuilder("{\"keys\":[")
+    pairs.forEachIndexed { i, (kid, k) ->
+        if (i > 0) sb.append(',')
+        sb.append("{\"kty\":\"oct\",\"k\":\"").append(k).append("\",\"kid\":\"").append(kid).append("\"}")
+    }
+    sb.append("],\"type\":\"temporary\"}")
+    return sb.toString().toByteArray()
+}
+
+/** Builds the right source for a channel: plain/HLS/DASH, with ClearKey or Widevine when the playlist asks for it. */
+private fun buildSource(ch: Channel, dsf: DataSource.Factory, forceHls: Boolean): MediaSource {
+    val b = MediaItem.Builder().setUri(ch.url)
+    when (ch.manifest) {
+        "dash", "mpd" -> b.setMimeType(MimeTypes.APPLICATION_MPD)
+        "hls" -> b.setMimeType(MimeTypes.APPLICATION_M3U8)
+    }
+    var drm: DrmSessionManager? = null
+    val key = ch.drmKey
+    val type = ch.drmType ?: ""
+    if (key != null && type.contains("clearkey")) {
+        val json = clearKeyJson(key)
+        if (json != null) {
+            b.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID).build())
+            drm = DefaultDrmSessionManager.Builder()
+                .setUuidAndExoMediaDrmProvider(C.CLEARKEY_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
+                .build(LocalMediaDrmCallback(json))
+        }
+    } else if (key != null && type.contains("widevine")) {
+        b.setDrmConfiguration(
+            MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+                .setLicenseUri(key.substringBefore('|').trim())
+                .setLicenseRequestHeaders(mapOf("User-Agent" to (ch.userAgent ?: DEFAULT_UA)))
+                .build()
+        )
+    }
+    val item = b.build()
+    if (forceHls) return HlsMediaSource.Factory(dsf).createMediaSource(item)
+    val factory = DefaultMediaSourceFactory(dsf)
+    val manager = drm
+    if (manager != null) factory.setDrmSessionManagerProvider { manager }
+    return factory.createMediaSource(item)
+}
 
 @Composable
 private fun ExoSurface(ch: Channel, st: PlayState) {
@@ -402,8 +471,9 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
 
     LaunchedEffect(exo) {
         while (true) {
-            st.pos = exo.currentPosition
-            st.dur = exo.duration.coerceAtLeast(0L)
+            val live = exo.isCurrentMediaItemLive
+            st.pos = if (live) 0L else exo.currentPosition
+            st.dur = if (live) 0L else exo.duration.coerceAtLeast(0L)
             delay(500)
         }
     }
@@ -418,13 +488,7 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
             .setReadTimeoutMs(15000)
         ch.referrer?.let { http.setDefaultRequestProperties(mapOf("Referer" to it)) }
         val dsf = DefaultDataSource.Factory(ctx, http)
-        val item = MediaItem.fromUri(ch.url)
-        val source = if (st.forceHls) {
-            HlsMediaSource.Factory(dsf).createMediaSource(item)
-        } else {
-            DefaultMediaSourceFactory(dsf).createMediaSource(item)
-        }
-        exo.setMediaSource(source)
+        exo.setMediaSource(buildSource(ch, dsf, st.forceHls))
         exo.prepare()
         exo.playWhenReady = true
     }

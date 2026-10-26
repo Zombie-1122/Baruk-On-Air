@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-enum class Kind { LIVE, MOVIE, SERIES, RADIO }
+enum class Kind { LIVE, RADIO }
 
 data class Channel(
     val name: String,
@@ -15,11 +15,13 @@ data class Channel(
     val userAgent: String?,
     val referrer: String?,
     val kind: Kind = Kind.LIVE,
-    val series: String? = null,
-    val season: Int = 0,
-    val episode: Int = 0,
     val tvgId: String? = null,
     val tvgName: String? = null,
+    val source: String = "",   // playlist provider (playlist name)
+    val number: Int = 0,       // tvg-chno, or position in the combined list
+    val drmType: String? = null, // "clearkey" / "widevine" (from #KODIPROP)
+    val drmKey: String? = null,
+    val manifest: String? = null, // "dash" / "hls" (from #KODIPROP)
 )
 
 data class Playlist(
@@ -30,30 +32,33 @@ data class Playlist(
     val epg: String? = null, // optional XMLTV override; null = auto-detect from provider
 )
 
+enum class Sort(val id: String, val label: String, val short: String) {
+    NUMBER("number", "Number", "Number"),
+    NAME("name", "Name", "Name"),
+    CATEGORY("category", "Category", "Category"),
+    PROVIDER("provider", "Playlist provider", "Provider"),
+    FREQUENCY("frequency", "Frequency (most watched)", "Frequency");
+
+    companion object {
+        fun of(id: String?): Sort = entries.firstOrNull { it.id == id } ?: NUMBER
+    }
+}
+
 object M3uParser {
     private val attrRegex = Regex("""([\w-]+)="([^"]*)"""")
-    private val epRegex = Regex("""(?i)\bS(\d{1,2})\s*[ ._-]?\s*E(\d{1,3})\b""")
-    private val videoExt = listOf(".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".flv")
     private val audioExt = listOf(".mp3", ".aac", ".ogg", ".m4a", ".pls", ".opus")
 
-    private fun classify(name: String, url: String, group: String, type: String?, radio: String?): Kind {
+    private fun classify(url: String, group: String, type: String?, radio: String?): Kind {
         val g = group.lowercase()
         val u = url.lowercase().substringBefore('?')
-        val t = type?.lowercase()
-        if (t == "series") return Kind.SERIES
-        if (t == "movie" || t == "movies" || t == "vod") return Kind.MOVIE
-        if (radio?.lowercase() == "true" || g.contains("radio") || audioExt.any { u.endsWith(it) }) return Kind.RADIO
-        if (u.contains("/series/") || g.contains("series") || g.contains("tv show") ||
-            g.contains("episode") || epRegex.containsMatchIn(name)
-        ) return Kind.SERIES
-        if (u.contains("/movie/") || u.contains("/movies/") || u.contains("/vod/") ||
-            g.contains("movie") || g.contains("film") || g.contains("vod") || g.contains("cinema") ||
-            videoExt.any { u.endsWith(it) }
-        ) return Kind.MOVIE
+        if (type?.lowercase() == "radio" || radio?.lowercase() == "true" ||
+            g.contains("radio") || audioExt.any { u.endsWith(it) }
+        ) return Kind.RADIO
         return Kind.LIVE
     }
 
-    fun parseFile(f: File): List<Channel> = f.useLines { parse(it) }
+    fun parseFile(f: File, source: String = "", firstNumber: Int = 1): List<Channel> =
+        f.useLines { parse(it, source, firstNumber) }
 
     /** XMLTV guide links declared in the playlist header (url-tvg / x-tvg-url). */
     fun headerEpgUrls(f: File): List<String> = f.useLines { lines ->
@@ -67,8 +72,9 @@ object M3uParser {
             .filter { it.startsWith("http", ignoreCase = true) }
     }
 
-    fun parse(lines: Sequence<String>): List<Channel> {
+    fun parse(lines: Sequence<String>, source: String = "", firstNumber: Int = 1): List<Channel> {
         val out = ArrayList<Channel>()
+        var next = firstNumber
         var name = ""
         var logo: String? = null
         var group: String? = null
@@ -78,9 +84,14 @@ object M3uParser {
         var radioAttr: String? = null
         var tvgId: String? = null
         var tvgName: String? = null
+        var chno = 0
+        // #KODIPROP lines may come before OR after #EXTINF, so they are only cleared after the URL.
+        var drmType: String? = null
+        var drmKey: String? = null
+        var manifest: String? = null
 
         for (raw in lines) {
-            val line = raw.trim().removePrefix("﻿")
+            val line = raw.trim().removePrefix("\uFEFF")
             if (line.isEmpty()) continue
 
             if (line.startsWith("#EXTINF", ignoreCase = true)) {
@@ -94,6 +105,7 @@ object M3uParser {
                 radioAttr = attrs["radio"]
                 tvgId = attrs["tvg-id"]?.trim()?.takeIf { it.isNotEmpty() }
                 tvgName = attrs["tvg-name"]?.trim()?.takeIf { it.isNotEmpty() }
+                chno = (attrs["tvg-chno"] ?: attrs["channel-number"])?.trim()?.toIntOrNull() ?: 0
                 logo = attrs["tvg-logo"]?.takeIf { it.isNotBlank() }
                 group = attrs["group-title"]?.takeIf { it.isNotBlank() }
                 if (name.isEmpty()) name = attrs["tvg-name"] ?: ""
@@ -105,6 +117,15 @@ object M3uParser {
                 val v = kv.substringAfter('=', "").trim()
                 if (k == "http-user-agent") ua = v
                 if (k == "http-referrer") ref = v
+            } else if (line.startsWith("#KODIPROP:", ignoreCase = true)) {
+                val kv = line.substringAfter(':')
+                val k = kv.substringBefore('=').trim().lowercase()
+                val v = kv.substringAfter('=', "").trim()
+                when (k) {
+                    "inputstream.adaptive.license_type" -> drmType = v.lowercase()
+                    "inputstream.adaptive.license_key" -> drmKey = v
+                    "inputstream.adaptive.manifest_type" -> manifest = v.lowercase()
+                }
             } else if (line.startsWith("#")) {
                 // other comment / tag: ignore
             } else {
@@ -122,22 +143,6 @@ object M3uParser {
                 if (url.contains("://")) {
                     val nm = name.ifBlank { url }
                     val gr = group ?: "Uncategorized"
-                    val kind = classify(nm, url, gr, tvgType, radioAttr)
-                    var seriesName: String? = null
-                    var season = 0
-                    var episode = 0
-                    if (kind == Kind.SERIES) {
-                        val m = epRegex.find(nm)
-                        if (m != null) {
-                            season = m.groupValues[1].toInt()
-                            episode = m.groupValues[2].toInt()
-                            seriesName = nm.removeRange(m.range)
-                                .trim(' ', '-', '_', '.', ':', '|')
-                                .ifBlank { gr }
-                        } else {
-                            seriesName = gr
-                        }
-                    }
                     out.add(
                         Channel(
                             name = nm,
@@ -146,17 +151,21 @@ object M3uParser {
                             group = gr,
                             userAgent = ua,
                             referrer = ref,
-                            kind = kind,
-                            series = seriesName,
-                            season = season,
-                            episode = episode,
+                            kind = classify(url, gr, tvgType, radioAttr),
                             tvgId = tvgId,
                             tvgName = tvgName,
+                            source = source,
+                            number = if (chno > 0) chno else next,
+                            drmType = drmType,
+                            drmKey = drmKey,
+                            manifest = manifest,
                         )
                     )
+                    next++
                 }
                 name = ""; logo = null; group = null; ua = null; ref = null
-                tvgType = null; radioAttr = null; tvgId = null; tvgName = null
+                tvgType = null; radioAttr = null; tvgId = null; tvgName = null; chno = 0
+                drmType = null; drmKey = null; manifest = null
             }
         }
         return out
@@ -206,6 +215,20 @@ class Store(private val ctx: Context) {
     // "vlc" was removed to keep the app small; old setting falls back to the built-in player.
     fun engine(): String = if (p.getString("engine", "exo") == "external") "external" else "exo"
     fun saveEngine(e: String) = p.edit().putString("engine", e).apply()
+
+    fun plays(): Map<String, Int> {
+        val o = JSONObject(p.getString("plays", "{}") ?: "{}")
+        return o.keys().asSequence().associateWith { o.optInt(it) }
+    }
+
+    fun savePlays(m: Map<String, Int>) {
+        val o = JSONObject()
+        for ((k, v) in m) o.put(k, v)
+        p.edit().putString("plays", o.toString()).apply()
+    }
+
+    fun sort(): Sort = Sort.of(p.getString("sort", null))
+    fun saveSort(s: Sort) = p.edit().putString("sort", s.id).apply()
 
     fun repo(): String = p.getString("repo", null) ?: BuildConfig.REPO
     fun saveRepo(r: String) = p.edit().putString("repo", r).apply()

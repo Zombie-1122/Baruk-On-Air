@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
@@ -154,7 +156,10 @@ fun PlaylistDialog(initial: Playlist?, onDismiss: () -> Unit, onSave: (String, S
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "Add playlist" else "Edit playlist") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 if (initial == null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Pill("M3U link", !xtream, { xtream = false })
