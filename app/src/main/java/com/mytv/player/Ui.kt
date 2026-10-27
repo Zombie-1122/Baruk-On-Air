@@ -52,9 +52,10 @@ import java.time.format.DateTimeFormatter
 // ---- palette (navy + blue, like the reference screenshot) ----
 val Bg = Color(0xFF0F1620)
 val Panel = Color(0xCC141C28)
-val Accent = Color(0xFF1769D6)
-val Sel = Color(0xCC1B3350)
-val SelBorder = Color(0xFF3A6EA8)
+val Accent = Color(0xFF0E8C7F)       // muted teal (was blue)
+val AccentLight = Color(0xFF5FD3C4)  // text/marks on dark
+val Sel = Color(0xCC15363A)
+val SelBorder = Color(0xFF2E8B83)
 val Txt = Color(0xFFE8EDF4)
 val Dim = Color(0xFF8C99AB)
 val Heart = Color(0xFFFF5A5F)

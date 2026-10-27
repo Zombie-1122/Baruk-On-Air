@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -72,6 +73,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DrmSessionManager
@@ -89,6 +91,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -120,6 +123,7 @@ private class PlayState {
     var pos by mutableLongStateOf(0L)
     var dur by mutableLongStateOf(0L)
     var forceHls = false
+    var uaIdx = 0 // index into UA_LIST, used when the playlist gives no user-agent
     var toggle: (() -> Unit)? = null
     var seek: ((Long) -> Unit)? = null
 
@@ -131,6 +135,13 @@ private class PlayState {
     var select: ((Int, Tracks.Group?, Int) -> Unit)? = null // group == null -> automatic
     var disable: ((Int) -> Unit)? = null
 }
+
+private val UA_LIST = listOf(
+    DEFAULT_UA,
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "Lavf/60.16.100",
+    "okhttp/4.12.0",
+)
 
 private val EXO_RESIZE = listOf(
     AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -172,6 +183,7 @@ fun PlayerScreen(
     val isVod = st.dur > 0L // known duration = recorded video; live streams report 0
 
     fun go(i: Int) {
+        st.uaIdx = 0
         st.forceHls = false
         st.error = null
         st.pos = 0L
@@ -304,9 +316,15 @@ fun PlayerScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("Can't play this one", color = Color.White)
-                Text(err, color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+                Text(
+                    err,
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { st.forceHls = false; st.error = null; st.attempt++ }) { Text("Retry") }
+                    Button(onClick = { st.forceHls = false; st.uaIdx = 0; st.error = null; st.attempt++ }) { Text("Retry") }
                     Button(onClick = { onExternal(ch) }) { Text("Open in app") }
                     TextButton(onClick = { go(index + 1) }) { Text("Next") }
                 }
@@ -395,7 +413,7 @@ fun PlayerScreen(
                         TextButton(onClick = {
                             st.toggle?.invoke()
                             tick++
-                        }) { Text(if (st.playWhenReady) "⏸" else "▶", fontSize = 28.sp, color = Color.White) }
+                        }) { PlayPause(st.playWhenReady) }
                         if (isVod) {
                             TextButton(onClick = { skip(10_000L) }) { Text("+10s", color = Color.White) }
                         }
@@ -425,6 +443,19 @@ fun PlayerScreen(
                 onClose = { panel = false },
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
+        }
+    }
+}
+
+@Composable
+private fun PlayPause(playing: Boolean) {
+    Box(Modifier.size(34.dp), contentAlignment = Alignment.Center) {
+        if (playing) {
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                repeat(2) { Box(Modifier.width(6.dp).height(22.dp).clip(RoundedCornerShape(2.dp)).background(Color.White)) }
+            }
+        } else {
+            Icon(Icons.Default.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(34.dp))
         }
     }
 }
@@ -599,7 +630,7 @@ private fun ChoiceRow(label: String, selected: Boolean, requester: FocusRequeste
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(if (selected) "\u25CF" else "\u25CB", color = if (selected) Color(0xFF6FA8F0) else Dim, fontSize = 14.sp)
+        Text(if (selected) "\u25CF" else "\u25CB", color = if (selected) AccentLight else Dim, fontSize = 14.sp)
         Spacer(Modifier.width(12.dp))
         Text(label, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
@@ -616,17 +647,9 @@ private fun jwkValue(v: String): String {
     return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 }
 
-/**
- * #KODIPROP license_key for ClearKey is either a ready JSON ({"keys":[...]}) or "kid:key" (hex),
- * several pairs separated by commas.
- */
-private fun clearKeyJson(raw: String): ByteArray? {
-    val t = raw.trim()
-    if (t.startsWith("{")) return t.toByteArray()
-    val pairs = t.split(',').mapNotNull { p ->
-        val kv = p.trim().split(':')
-        if (kv.size == 2 && kv[0].isNotBlank() && kv[1].isNotBlank()) jwkValue(kv[0].trim()) to jwkValue(kv[1].trim()) else null
-    }
+private val KV_PAIR = Regex(""""([^"]+)"\s*:\s*"([^"]+)"""")
+
+private fun jwk(pairs: List<Pair<String, String>>): ByteArray? {
     if (pairs.isEmpty()) return null
     val sb = StringBuilder("{\"keys\":[")
     pairs.forEachIndexed { i, (kid, k) ->
@@ -635,6 +658,24 @@ private fun clearKeyJson(raw: String): ByteArray? {
     }
     sb.append("],\"type\":\"temporary\"}")
     return sb.toString().toByteArray()
+}
+
+/**
+ * #KODIPROP license_key for ClearKey comes in three shapes:
+ *  1. ready JWK:            {"keys":[{"kty":"oct","k":"..","kid":".."}],"type":"temporary"}
+ *  2. map of hex pairs:     {"<kid hex>": "<key hex>", ...}
+ *  3. plain list:           <kid hex>:<key hex>,<kid hex>:<key hex>
+ */
+private fun clearKeyJson(raw: String): ByteArray? {
+    val t = raw.trim()
+    if (t.startsWith("{")) {
+        if (t.contains("\"keys\"")) return t.toByteArray()
+        return jwk(KV_PAIR.findAll(t).map { jwkValue(it.groupValues[1].trim()) to jwkValue(it.groupValues[2].trim()) }.toList())
+    }
+    return jwk(t.split(',').mapNotNull { p ->
+        val kv = p.trim().split(':')
+        if (kv.size == 2 && kv[0].isNotBlank() && kv[1].isNotBlank()) jwkValue(kv[0].trim()) to jwkValue(kv[1].trim()) else null
+    })
 }
 
 /** Builds the right source for a channel: plain/HLS/DASH, with ClearKey or Widevine when the playlist asks for it. */
@@ -647,7 +688,14 @@ private fun buildSource(ch: Channel, dsf: DataSource.Factory, forceHls: Boolean)
     var drm: DrmSessionManager? = null
     val key = ch.drmKey
     val type = ch.drmType ?: ""
-    if (key != null && type.contains("clearkey")) {
+    if (key != null && type.contains("clearkey") && key.trim().startsWith("http", ignoreCase = true)) {
+        b.setDrmConfiguration(
+            MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
+                .setLicenseUri(key.trim())
+                .setLicenseRequestHeaders(mapOf("User-Agent" to (ch.userAgent ?: DEFAULT_UA)))
+                .build()
+        )
+    } else if (key != null && type.contains("clearkey")) {
         val json = clearKeyJson(key)
         if (json != null) {
             b.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID).build())
@@ -714,15 +762,26 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                val unknownFormat = generateSequence<Throwable>(error) { it.cause }
-                    .any { it is UnrecognizedInputFormatException }
+                val chain = generateSequence<Throwable>(error) { it.cause }.toList()
+                val unknownFormat = chain.any { it is UnrecognizedInputFormatException }
+                val http = chain.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
                 if (unknownFormat && !st.forceHls) {
                     // stream without .m3u8 extension -> try as HLS
                     st.forceHls = true
                     st.attempt++
+                } else if (http != null && http.responseCode in 400..499 && chNow.userAgent == null &&
+                    st.uaIdx < UA_LIST.lastIndex
+                ) {
+                    // some servers refuse the default player name: retry as a different client
+                    st.uaIdx++
+                    st.attempt++
                 } else {
                     st.buffering = false
-                    st.error = error.errorCodeName
+                    val detail = when {
+                        http != null -> "HTTP ${http.responseCode}"
+                        else -> chain.drop(1).firstNotNullOfOrNull { it.message?.takeIf { m -> m.isNotBlank() } }?.take(90)
+                    }
+                    st.error = error.errorCodeName + (if (detail != null) "\n$detail" else "")
                 }
             }
         }
@@ -766,7 +825,7 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
         st.maxHeight = 0
         st.tracks = Tracks.EMPTY
         val http = DefaultHttpDataSource.Factory()
-            .setUserAgent(ch.userAgent ?: DEFAULT_UA)
+            .setUserAgent(ch.userAgent ?: UA_LIST[st.uaIdx.coerceIn(0, UA_LIST.lastIndex)])
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)

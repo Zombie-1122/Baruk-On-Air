@@ -358,7 +358,7 @@ private fun SortMenu(current: Sort, onPick: (Sort) -> Unit) {
                     text = {
                         Text(
                             s.label,
-                            color = if (s == current) Color(0xFF6FA8F0) else Txt,
+                            color = if (s == current) AccentLight else Txt,
                             fontWeight = if (s == current) FontWeight.SemiBold else FontWeight.Normal,
                         )
                     },
