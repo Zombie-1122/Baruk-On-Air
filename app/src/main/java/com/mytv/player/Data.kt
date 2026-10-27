@@ -44,6 +44,16 @@ enum class Sort(val id: String, val label: String, val short: String) {
     }
 }
 
+/** Playlists often write values as http-user-agent="Mozilla/5.0 ..." - drop those wrapping quotes. */
+fun unquote(s: String): String {
+    val t = s.trim()
+    return if (t.length >= 2 && ((t.first() == '"' && t.last() == '"') || (t.first() == '\'' && t.last() == '\''))) {
+        t.substring(1, t.length - 1).trim()
+    } else {
+        t
+    }
+}
+
 object M3uParser {
     private val attrRegex = Regex("""([\w-]+)="([^"]*)"""")
     private val audioExt = listOf(".mp3", ".aac", ".ogg", ".m4a", ".pls", ".opus")
@@ -113,14 +123,14 @@ object M3uParser {
                 if (group == null) group = line.substringAfter(':').trim().ifEmpty { null }
             } else if (line.startsWith("#EXTVLCOPT:", ignoreCase = true)) {
                 val kv = line.substringAfter(':')
-                val k = kv.substringBefore('=').lowercase()
-                val v = kv.substringAfter('=', "").trim()
-                if (k == "http-user-agent") ua = v
-                if (k == "http-referrer") ref = v
+                val k = kv.substringBefore('=').trim().lowercase()
+                val v = unquote(kv.substringAfter('=', ""))
+                if (k == "http-user-agent") ua = v.ifEmpty { null }
+                if (k == "http-referrer" || k == "http-referer") ref = v.ifEmpty { null }
             } else if (line.startsWith("#KODIPROP:", ignoreCase = true)) {
                 val kv = line.substringAfter(':')
                 val k = kv.substringBefore('=').trim().lowercase()
-                val v = kv.substringAfter('=', "").trim()
+                val v = unquote(kv.substringAfter('=', ""))
                 when (k) {
                     "inputstream.adaptive.license_type" -> drmType = v.lowercase()
                     "inputstream.adaptive.license_key" -> drmKey = v
@@ -135,9 +145,9 @@ object M3uParser {
                     url = parts[0]
                     for (h in parts[1].split('&')) {
                         val k = h.substringBefore('=').lowercase()
-                        val v = h.substringAfter('=', "")
-                        if (k == "user-agent") ua = v
-                        if (k == "referer" || k == "referrer") ref = v
+                        val v = unquote(h.substringAfter('=', ""))
+                        if (k == "user-agent") ua = v.ifEmpty { null }
+                        if (k == "referer" || k == "referrer") ref = v.ifEmpty { null }
                     }
                 }
                 if (url.contains("://")) {

@@ -829,7 +829,14 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
-        ch.referrer?.let { http.setDefaultRequestProperties(mapOf("Referer" to it)) }
+        ch.referrer?.let { ref ->
+            val headers = mutableMapOf("Referer" to ref)
+            // many CDNs also check Origin (scheme://host of the referrer)
+            runCatching { java.net.URI(ref) }.getOrNull()?.let { u ->
+                if (u.scheme != null && u.authority != null) headers["Origin"] = "${u.scheme}://${u.authority}"
+            }
+            http.setDefaultRequestProperties(headers)
+        }
         val dsf = DefaultDataSource.Factory(ctx, http)
         exo.setMediaSource(buildSource(ch, dsf, st.forceHls))
         st.loadedUrl = ch.url
