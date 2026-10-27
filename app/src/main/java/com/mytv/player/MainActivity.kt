@@ -146,6 +146,7 @@ fun App(vm: MainVm = viewModel()) {
             onClose = { playing = null },
             onExternal = { openExternal(ctx, it) },
             onWatched = { vm.watched(it) },
+            onHeight = { c, h -> vm.learnHeight(c, h) },
         )
         return
     }
@@ -307,6 +308,7 @@ fun HomeScreen(
                                         ch = ch,
                                         selected = sel == i,
                                         number = if (sort == Sort.NUMBER) ch.number else 0,
+                                        quality = vm.qualityOf(ch),
                                         subtitle = if (kind == Kind.LIVE) (cur?.title ?: "No programme info") else ch.group,
                                         progress = cur?.let { (now - it.start).toFloat() / (it.stop - it.start).coerceAtLeast(1) },
                                         fav = ch.url in vm.favorites,
@@ -322,6 +324,7 @@ fun HomeScreen(
                     val picked = entries.getOrNull(sel.coerceIn(0, (entries.size - 1).coerceAtLeast(0)))
                     Detail(
                         ch = picked,
+                        quality = picked?.let { vm.qualityOf(it) },
                         kind = kind,
                         progs = if (picked != null && kind == Kind.LIVE) vm.epg.of(picked) else emptyList(),
                         now = now,
@@ -447,6 +450,7 @@ private fun ListRow(
     ch: Channel,
     selected: Boolean,
     number: Int,
+    quality: String?,
     subtitle: String,
     progress: Float?,
     fav: Boolean,
@@ -476,15 +480,22 @@ private fun ListRow(
                 modifier = Modifier.width(34.dp),
             )
         }
-        Logo(ch.logo, ch.name, 48.dp)
-        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-            Text(
-                ch.name,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+        Logo(ch.logo, ch.name, 68.dp)
+        Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    ch.name,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (quality != null) {
+                    Spacer(Modifier.width(8.dp))
+                    QualityBadge(quality)
+                }
+            }
             Text(
                 subtitle,
                 fontSize = 12.sp,
@@ -502,6 +513,7 @@ private fun ListRow(
 @Composable
 private fun Detail(
     ch: Channel?,
+    quality: String?,
     kind: Kind,
     progs: List<Programme>,
     now: Long,
@@ -512,8 +524,8 @@ private fun Detail(
 ) {
     Column(modifier.padding(horizontal = 20.dp, vertical = 14.dp).verticalScroll(rememberScrollState())) {
         if (ch != null) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Logo(ch.logo, ch.name, 64.dp)
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Logo(ch.logo, ch.name, 108.dp)
                 Column(Modifier.weight(1f)) {
                     Text(
                         ch.name,
@@ -522,21 +534,33 @@ private fun Detail(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        if (ch.source.isNotEmpty()) "${ch.group}  |  ${ch.source}" else ch.group,
-                        color = Dim,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                        if (quality != null) {
+                            QualityBadge(quality)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(
+                            if (ch.source.isNotEmpty()) "${ch.group}  |  ${ch.source}" else ch.group,
+                            color = Dim,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(top = 10.dp),
+                    ) {
+                        Pill("Watch", true, onOpen)
+                        IconBtn(
+                            if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            "Favorite",
+                            onFav,
+                            tint = if (fav) Heart else Dim,
+                        )
+                    }
                 }
-                IconBtn(
-                    if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                    "Favorite",
-                    onFav,
-                    tint = if (fav) Heart else Dim,
-                )
-                Pill("Watch", true, onOpen)
             }
 
             if (kind == Kind.LIVE) {

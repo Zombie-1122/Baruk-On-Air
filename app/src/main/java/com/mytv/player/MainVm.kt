@@ -55,6 +55,8 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     var plays by mutableStateOf(store.plays())
         private set
+    var heights by mutableStateOf(store.heights())
+        private set
 
     var epg by mutableStateOf(EpgIndex.EMPTY)
         private set
@@ -83,6 +85,17 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         sort = s
         store.saveSort(s)
     }
+
+    /** Highest video height seen for this channel while playing; remembered so the list can show SD/HD/FHD. */
+    fun learnHeight(c: Channel, h: Int) {
+        if (h > (heights[c.url] ?: 0)) {
+            heights = heights + (c.url to h)
+            store.saveHeights(heights)
+        }
+    }
+
+    /** SD / HD / FHD / 4K: from what the stream really offered, else guessed from the channel name. */
+    fun qualityOf(c: Channel): String? = qualityLabel(heights[c.url] ?: 0) ?: nameQuality(c.name)
 
     /** Called after a channel has actually been watched for a few seconds (drives "Frequency" sort). */
     fun watched(c: Channel) {

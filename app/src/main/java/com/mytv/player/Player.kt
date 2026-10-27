@@ -84,6 +84,25 @@ import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.media3.common.Format
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import java.util.Locale
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
@@ -103,6 +122,14 @@ private class PlayState {
     var forceHls = false
     var toggle: (() -> Unit)? = null
     var seek: ((Long) -> Unit)? = null
+
+    // tracks / quality
+    var tracks by mutableStateOf(Tracks.EMPTY)
+    var maxHeight by mutableIntStateOf(0)   // tallest video track seen for the current channel
+    var codecAlt by mutableStateOf(false)   // "Switch codec": prefer the other decoder
+    var loadedUrl: String? = null           // url that the player is really playing right now
+    var select: ((Int, Tracks.Group?, Int) -> Unit)? = null // group == null -> automatic
+    var disable: ((Int) -> Unit)? = null
 }
 
 private val EXO_RESIZE = listOf(
@@ -129,6 +156,7 @@ fun PlayerScreen(
     onClose: () -> Unit,
     onExternal: (Channel) -> Unit,
     onWatched: (Channel) -> Unit,
+    onHeight: (Channel, Int) -> Unit,
 ) {
     val ctx = LocalContext.current
     val view = LocalView.current
@@ -137,6 +165,7 @@ fun PlayerScreen(
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, channels.lastIndex)) }
     var controls by remember { mutableStateOf(true) }
     var tick by remember { mutableIntStateOf(0) }
+    var panel by remember { mutableStateOf(false) }
     val st = remember { PlayState() }
     val focus = remember { FocusRequester() }
     val ch = channels[index]
@@ -147,6 +176,7 @@ fun PlayerScreen(
         st.error = null
         st.pos = 0L
         st.dur = 0L
+        st.maxHeight = 0
         index = (i + channels.size) % channels.size
         tick++
     }
@@ -156,6 +186,13 @@ fun PlayerScreen(
         st.seek?.invoke(if (st.dur > 0) target.coerceAtMost(st.dur) else target)
         tick++
     }
+
+    // remember the real resolution so the channel list can show SD / HD / FHD
+    LaunchedEffect(st.maxHeight, ch.url) {
+        if (st.maxHeight > 0) onHeight(ch, st.maxHeight)
+    }
+    val quality = qualityLabel(st.maxHeight) ?: nameQuality(ch.name)
+    BackHandler(enabled = panel) { panel = false }
 
     // count it as "watched" (for Frequency sort) only after a few seconds, so channel surfing doesn't count
     LaunchedEffect(ch.url) {
@@ -199,6 +236,7 @@ fun PlayerScreen(
             .focusRequester(focus)
             .focusable()
             .onPreviewKeyEvent { e ->
+                if (panel) return@onPreviewKeyEvent false
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 if (controls) {
                     tick++
@@ -246,8 +284,12 @@ fun PlayerScreen(
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectTapGestures {
-                        controls = !controls
-                        tick++
+                        if (panel) {
+                            panel = false
+                        } else {
+                            controls = !controls
+                            tick++
+                        }
                     }
                 }
         )
@@ -286,7 +328,19 @@ fun PlayerScreen(
                     }
                     val nowProg = if (ch.kind == Kind.LIVE) epg.of(ch).nowAt(System.currentTimeMillis()) else null
                     Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
-                        Text(ch.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                ch.name,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (quality != null) {
+                                Spacer(Modifier.width(8.dp))
+                                QualityBadge(quality)
+                            }
+                        }
                         if (nowProg != null) {
                             Text(
                                 "${hm(nowProg.start)} - ${hm(nowProg.stop)}  ${nowProg.title}",
@@ -356,11 +410,198 @@ fun PlayerScreen(
                             st.resizeIdx = (st.resizeIdx + 1) % 3
                             tick++
                         }) { Text("Zoom", color = Color.White) }
+                        TextButton(onClick = { panel = true; controls = false }) { Text("Tracks", color = Color.White) }
                         TextButton(onClick = { onExternal(ch) }) { Text("Open in app", color = Color.White) }
                     }
                 }
             }
         }
+
+        if (panel) {
+            TracksPanel(
+                name = ch.name,
+                quality = quality,
+                st = st,
+                onClose = { panel = false },
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------- "Media tracks" panel
+
+private class TrackRow(val group: Tracks.Group, val index: Int) {
+    val format: Format get() = group.getTrackFormat(index)
+    val selected: Boolean get() = group.isTrackSelected(index)
+}
+
+private fun rowsOf(groups: List<Tracks.Group>): List<TrackRow> =
+    groups.flatMap { g -> (0 until g.length).map { TrackRow(g, it) } }
+
+private fun mbps(bitrate: Int): String =
+    if (bitrate > 0) ", %.2f Mbps".format(Locale.US, bitrate / 1_000_000f) else ""
+
+private fun langName(f: Format): String? {
+    val l = f.language?.takeIf { it.isNotBlank() && it != "und" } ?: return null
+    return Locale.forLanguageTag(l).displayLanguage.takeIf { it.isNotBlank() } ?: l
+}
+
+private fun videoLabel(f: Format): String {
+    val q = qualityLabel(f.height)
+    val size = if (f.width > 0 && f.height > 0) "${f.width} \u00D7 ${f.height}" else "Video"
+    return size + (if (q != null) "  $q" else "") + mbps(f.bitrate)
+}
+
+private fun audioLabel(f: Format, n: Int): String {
+    val ch = when (f.channelCount) {
+        1 -> "Mono"
+        2 -> "Stereo"
+        6 -> "5.1"
+        8 -> "7.1"
+        else -> null
+    }
+    return (f.label ?: langName(f) ?: "Track $n") + (if (ch != null) ", $ch" else "") + mbps(f.bitrate)
+}
+
+private fun textLabel(f: Format, n: Int): String = f.label ?: langName(f) ?: "Subtitle $n"
+
+@Composable
+private fun TracksPanel(name: String, quality: String?, st: PlayState, onClose: () -> Unit, modifier: Modifier) {
+    var page by remember { mutableIntStateOf(0) } // 0 overview, 1 video, 2 audio, 3 subtitles
+    val first = remember { FocusRequester() }
+    LaunchedEffect(page) { runCatching { first.requestFocus() } }
+
+    val groups = st.tracks.groups
+    val video = rowsOf(groups.filter { it.type == C.TRACK_TYPE_VIDEO }).sortedBy { it.format.height }
+    val audio = rowsOf(groups.filter { it.type == C.TRACK_TYPE_AUDIO })
+    val text = rowsOf(groups.filter { it.type == C.TRACK_TYPE_TEXT })
+    val titles = listOf("Media tracks", "Video", "Audio", "Subtitles")
+
+    Column(
+        modifier
+            .fillMaxHeight()
+            .fillMaxWidth(0.48f)
+            .background(Color(0xF0172131))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconBtn(Icons.AutoMirrored.Filled.ArrowBack, "Back", { if (page == 0) onClose() else page = 0 })
+            Text(
+                titles[page],
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.width(44.dp))
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(name, color = Color(0xE6FFFFFF), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (quality != null) {
+                Spacer(Modifier.width(8.dp))
+                QualityBadge(quality)
+            }
+        }
+
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            when (page) {
+                0 -> {
+                    PanelRow(
+                        title = "Video (${video.size})",
+                        lines = video.map { videoLabel(it.format) }.ifEmpty { listOf("No video info yet") },
+                        requester = first,
+                        onClick = { page = 1 },
+                    )
+                    PanelRow(
+                        title = "Audio (${audio.size})",
+                        lines = audio.mapIndexed { i, r -> audioLabel(r.format, i + 1) }.ifEmpty { listOf("No audio info yet") },
+                        onClick = { page = 2 },
+                    )
+                    PanelRow(
+                        title = "Subtitles (${text.size})",
+                        lines = text.mapIndexed { i, r -> textLabel(r.format, i + 1) }.ifEmpty { listOf("None") },
+                        onClick = { page = 3 },
+                    )
+                    PanelRow(
+                        title = "Switch codec (Load stream via different decoder)",
+                        lines = listOf(if (st.codecAlt) "Decoder: alternative" else "Decoder: default"),
+                        onClick = { st.codecAlt = !st.codecAlt },
+                    )
+                }
+                1 -> {
+                    val videoAuto = video.count { it.selected } != 1 || video.size == 1
+                    ChoiceRow("Auto (adaptive)", videoAuto, first) { st.select?.invoke(C.TRACK_TYPE_VIDEO, null, 0) }
+                    for (r in video.asReversed()) {
+                        ChoiceRow(videoLabel(r.format), !videoAuto && r.selected) {
+                            st.select?.invoke(C.TRACK_TYPE_VIDEO, r.group, r.index)
+                        }
+                    }
+                }
+                2 -> {
+                    if (audio.isEmpty()) Text("No audio tracks", color = Dim, modifier = Modifier.padding(16.dp))
+                    audio.forEachIndexed { i, r ->
+                        ChoiceRow(audioLabel(r.format, i + 1), r.selected, if (i == 0) first else null) {
+                            st.select?.invoke(C.TRACK_TYPE_AUDIO, r.group, r.index)
+                        }
+                    }
+                }
+                else -> {
+                    ChoiceRow("Off", text.none { it.selected }, first) { st.disable?.invoke(C.TRACK_TYPE_TEXT) }
+                    text.forEachIndexed { i, r ->
+                        ChoiceRow(textLabel(r.format, i + 1), r.selected) {
+                            st.select?.invoke(C.TRACK_TYPE_TEXT, r.group, r.index)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PanelRow(title: String, lines: List<String>, onClick: () -> Unit, requester: FocusRequester? = null) {
+    val shape = RoundedCornerShape(10.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp)
+            .clip(shape)
+            .tvFocus(shape)
+            .then(if (requester != null) Modifier.focusRequester(requester) else Modifier)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        for (l in lines.take(7)) {
+            Text(l, color = Color(0xCCFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+        }
+    }
+}
+
+@Composable
+private fun ChoiceRow(label: String, selected: Boolean, requester: FocusRequester? = null, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .clip(shape)
+            .background(if (selected) Sel else Color.Transparent)
+            .tvFocus(shape)
+            .then(if (requester != null) Modifier.focusRequester(requester) else Modifier)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(if (selected) "\u25CF" else "\u25CB", color = if (selected) Color(0xFF6FA8F0) else Dim, fontSize = 14.sp)
+        Spacer(Modifier.width(12.dp))
+        Text(label, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -430,10 +671,22 @@ private fun buildSource(ch: Channel, dsf: DataSource.Factory, forceHls: Boolean)
     return factory.createMediaSource(item)
 }
 
+/** "Switch codec": when [alt] is set, hardware/software decoder order is reversed so another decoder is tried first. */
+private fun buildExo(ctx: Context, alt: Boolean): ExoPlayer {
+    val rf = DefaultRenderersFactory(ctx).setEnableDecoderFallback(true)
+    if (alt) {
+        rf.setMediaCodecSelector { mime, secure, tunneling ->
+            MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneling).reversed()
+        }
+    }
+    return ExoPlayer.Builder(ctx, rf).build()
+}
+
 @Composable
 private fun ExoSurface(ch: Channel, st: PlayState) {
     val ctx = LocalContext.current
-    val exo = remember { ExoPlayer.Builder(ctx).build() }
+    val chNow by rememberUpdatedState(ch)
+    val exo = remember(st.codecAlt) { buildExo(ctx, st.codecAlt) }
 
     DisposableEffect(exo) {
         val l = object : Player.Listener {
@@ -443,6 +696,21 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 st.playWhenReady = playWhenReady
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                st.tracks = tracks
+                if (st.loadedUrl != chNow.url) return
+                var h = 0
+                for (g in tracks.groups) {
+                    if (g.type != C.TRACK_TYPE_VIDEO) continue
+                    for (i in 0 until g.length) h = maxOf(h, g.getTrackFormat(i).height)
+                }
+                if (h > st.maxHeight) st.maxHeight = h
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (st.loadedUrl == chNow.url && videoSize.height > st.maxHeight) st.maxHeight = videoSize.height
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -461,10 +729,24 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
         exo.addListener(l)
         st.toggle = { exo.playWhenReady = !exo.playWhenReady }
         st.seek = { ms -> exo.seekTo(ms) }
+        st.select = { type, group, idx ->
+            val b = exo.trackSelectionParameters.buildUpon().setTrackTypeDisabled(type, false)
+            if (group == null) {
+                b.clearOverridesOfType(type)
+            } else {
+                b.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, idx))
+            }
+            exo.trackSelectionParameters = b.build()
+        }
+        st.disable = { type ->
+            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().setTrackTypeDisabled(type, true).build()
+        }
         onDispose {
             exo.removeListener(l)
             st.toggle = null
             st.seek = null
+            st.select = null
+            st.disable = null
             exo.release()
         }
     }
@@ -478,9 +760,11 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
         }
     }
 
-    LaunchedEffect(ch.url, st.attempt) {
+    LaunchedEffect(exo, ch.url, st.attempt) {
         st.error = null
         st.buffering = true
+        st.maxHeight = 0
+        st.tracks = Tracks.EMPTY
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(ch.userAgent ?: DEFAULT_UA)
             .setAllowCrossProtocolRedirects(true)
@@ -489,6 +773,7 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
         ch.referrer?.let { http.setDefaultRequestProperties(mapOf("Referer" to it)) }
         val dsf = DefaultDataSource.Factory(ctx, http)
         exo.setMediaSource(buildSource(ch, dsf, st.forceHls))
+        st.loadedUrl = ch.url
         exo.prepare()
         exo.playWhenReady = true
     }
@@ -501,6 +786,9 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
                 this.player = exo
             }
         },
-        update = { it.resizeMode = EXO_RESIZE[st.resizeIdx] },
+        update = {
+            it.player = exo
+            it.resizeMode = EXO_RESIZE[st.resizeIdx]
+        },
     )
 }

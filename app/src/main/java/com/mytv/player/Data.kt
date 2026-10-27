@@ -227,6 +227,17 @@ class Store(private val ctx: Context) {
         p.edit().putString("plays", o.toString()).apply()
     }
 
+    fun heights(): Map<String, Int> {
+        val o = JSONObject(p.getString("heights", "{}") ?: "{}")
+        return o.keys().asSequence().associateWith { o.optInt(it) }
+    }
+
+    fun saveHeights(m: Map<String, Int>) {
+        val o = JSONObject()
+        for ((k, v) in m) o.put(k, v)
+        p.edit().putString("heights", o.toString()).apply()
+    }
+
     fun sort(): Sort = Sort.of(p.getString("sort", null))
     fun saveSort(s: Sort) = p.edit().putString("sort", s.id).apply()
 
