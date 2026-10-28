@@ -2,6 +2,7 @@ package com.mytv.player
 
 import android.app.Application
 import android.net.Uri
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +51,16 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     var checking by mutableStateOf(false)
         private set
+
+    // Home-screen position. Kept here (not in the screen) because the home screen is removed
+    // while a channel plays; this way you come back to the same tab, category, search and spot.
+    var tab by mutableIntStateOf(0)
+    var cat by mutableStateOf("")
+    var query by mutableStateOf("")
+    var searching by mutableStateOf(false)
+    var selUrl by mutableStateOf<String?>(null)
+    val listState = LazyListState()
+    val catState = LazyListState()
 
     var sort by mutableStateOf(store.sort())
         private set

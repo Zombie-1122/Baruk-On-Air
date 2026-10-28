@@ -147,21 +147,22 @@ fun IconBtn(
     }
 }
 
+/** Channel logo: drawn as-is, scaled to fit its box (no tile or border). Only the no-logo placeholder gets a faint tile. */
 @Composable
 fun Logo(url: String?, name: String, size: Dp, fit: Boolean = true, width: Dp = size) {
-    val shape = RoundedCornerShape(10.dp)
-    Box(
-        Modifier.size(width, size).clip(shape).background(Color(0x22FFFFFF)),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (url != null) {
-            AsyncImage(
-                model = url,
-                contentDescription = null,
-                contentScale = if (fit) ContentScale.Fit else ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().then(if (fit) Modifier.padding(4.dp) else Modifier),
-            )
-        } else {
+    if (url != null) {
+        AsyncImage(
+            model = url,
+            contentDescription = null,
+            contentScale = if (fit) ContentScale.Fit else ContentScale.Crop,
+            alignment = Alignment.CenterStart,
+            modifier = Modifier.size(width, size),
+        )
+    } else {
+        Box(
+            Modifier.size(width, size).clip(RoundedCornerShape(10.dp)).background(Color(0x22FFFFFF)),
+            contentAlignment = Alignment.Center,
+        ) {
             Text(name.take(1).uppercase(), color = Dim, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         }
     }

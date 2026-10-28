@@ -167,6 +167,7 @@ fun PlayerScreen(
     onClose: () -> Unit,
     onExternal: (Channel) -> Unit,
     onWatched: (Channel) -> Unit,
+    onTune: (Channel) -> Unit,
     onHeight: (Channel, Int) -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -208,6 +209,7 @@ fun PlayerScreen(
 
     // count it as "watched" (for Frequency sort) only after a few seconds, so channel surfing doesn't count
     LaunchedEffect(ch.url) {
+        onTune(ch) // so the list is positioned on this channel when you come back
         delay(8000)
         onWatched(ch)
     }

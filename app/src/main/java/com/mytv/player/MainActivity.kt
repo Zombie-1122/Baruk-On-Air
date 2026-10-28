@@ -145,6 +145,7 @@ fun App(vm: MainVm = viewModel()) {
             onFav = { vm.toggleFavorite(it) },
             onClose = { playing = null },
             onExternal = { openExternal(ctx, it) },
+            onTune = { vm.selUrl = it.url },
             onWatched = { vm.watched(it) },
             onHeight = { c, h -> vm.learnHeight(c, h) },
         )
@@ -182,11 +183,10 @@ fun HomeScreen(
     onPlay: (List<Channel>, Int) -> Unit,
     onSettings: () -> Unit,
 ) {
-    var query by rememberSaveable { mutableStateOf("") }
-    var searching by rememberSaveable { mutableStateOf(false) }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
-    var cat by rememberSaveable { mutableStateOf("") }
-    var sel by remember { mutableIntStateOf(0) }
+    var query by vm::query
+    var searching by vm::searching
+    var tab by vm::tab
+    var cat by vm::cat
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val snack = remember { SnackbarHostState() }
     val showTitle = LocalConfiguration.current.screenWidthDp >= 760
@@ -205,7 +205,15 @@ fun HomeScreen(
             vm.message = null
         }
     }
-    LaunchedEffect(tab, cat, query, sort) { sel = 0 }
+    // jump back to the top only when the user changes tab/category/search/sort (not when returning from the player)
+    val filterKey = listOf(tab, cat, query, sort)
+    var seenKey by remember { mutableStateOf(filterKey) }
+    LaunchedEffect(filterKey) {
+        if (filterKey != seenKey) {
+            seenKey = filterKey
+            vm.listState.scrollToItem(0)
+        }
+    }
     BackHandler(enabled = searching) { searching = false; query = "" }
 
     val ofKind = remember(vm.channels, kind) { vm.channels.filter { it.kind == kind } }
@@ -225,6 +233,18 @@ fun HomeScreen(
             Sort.CATEGORY -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.group })
             Sort.PROVIDER -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.source })
             Sort.FREQUENCY -> base.sortedByDescending { vm.plays[it.url] ?: 0 }
+        }
+    }
+
+    // selected row is remembered by channel (not by position), so it survives re-sorting and the player
+    val sel = entries.indexOfFirst { it.url == vm.selUrl }.let { if (it < 0) 0 else it }
+
+    // coming back from the player: make sure the last channel is on screen
+    LaunchedEffect(Unit) {
+        val i = entries.indexOfFirst { it.url == vm.selUrl }
+        val vis = vm.listState.layoutInfo.visibleItemsInfo
+        if (i >= 0 && (vis.isEmpty() || i < vis.first().index || i > vis.last().index)) {
+            vm.listState.scrollToItem((i - 1).coerceAtLeast(0))
         }
     }
 
@@ -273,6 +293,7 @@ fun HomeScreen(
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     LazyColumn(
                         Modifier.weight(0.22f).fillMaxHeight(),
+                        state = vm.catState,
                         contentPadding = PaddingValues(8.dp),
                     ) {
                         item { CategoryItem("All", cat.isEmpty()) { cat = "" } }
@@ -300,6 +321,7 @@ fun HomeScreen(
                         } else {
                             LazyColumn(
                                 Modifier.weight(1f).fillMaxWidth(),
+                                state = vm.listState,
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             ) {
                                 itemsIndexed(entries) { i, ch ->
@@ -312,8 +334,8 @@ fun HomeScreen(
                                         subtitle = if (kind == Kind.LIVE) (cur?.title ?: "No programme info") else ch.group,
                                         progress = cur?.let { (now - it.start).toFloat() / (it.stop - it.start).coerceAtLeast(1) },
                                         fav = ch.url in vm.favorites,
-                                        onFocus = { if (it) sel = i },
-                                        onClick = { if (sel == i) onPlay(entries, i) else sel = i },
+                                        onFocus = { if (it) vm.selUrl = ch.url },
+                                        onClick = { if (sel == i) onPlay(entries, i) else vm.selUrl = ch.url },
                                         onLong = { vm.toggleFavorite(ch) },
                                     )
                                 }
@@ -321,7 +343,7 @@ fun HomeScreen(
                         }
                     }
                     VDivider()
-                    val picked = entries.getOrNull(sel.coerceIn(0, (entries.size - 1).coerceAtLeast(0)))
+                    val picked = entries.getOrNull(sel)
                     Detail(
                         ch = picked,
                         quality = picked?.let { vm.qualityOf(it) },
@@ -480,7 +502,7 @@ private fun ListRow(
                 modifier = Modifier.width(34.dp),
             )
         }
-        Logo(ch.logo, ch.name, 68.dp)
+        Logo(ch.logo, ch.name, 60.dp, width = 92.dp)
         Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -525,7 +547,7 @@ private fun Detail(
     Column(modifier.padding(horizontal = 20.dp, vertical = 14.dp).verticalScroll(rememberScrollState())) {
         if (ch != null) {
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Logo(ch.logo, ch.name, 108.dp)
+                Logo(ch.logo, ch.name, 92.dp, width = 128.dp)
                 Column(Modifier.weight(1f)) {
                     Text(
                         ch.name,
