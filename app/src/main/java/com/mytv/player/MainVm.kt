@@ -41,6 +41,10 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     var message by mutableStateOf<String?>(null)
 
+    // people who already have playlists (updating the app) skip the welcome
+    var welcomed by mutableStateOf(store.welcomed() || store.playlists().isNotEmpty())
+        private set
+
     var engine by mutableStateOf(store.engine())
         private set
     var repo by mutableStateOf(store.repo())
@@ -77,6 +81,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
 
     init {
+        Pal.dark = store.dark()
         viewModelScope.launch {
             loadCache()
             autoRefresh()
@@ -86,6 +91,16 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     // ---- app update (GitHub releases) ----
+
+    fun chooseDark(dark: Boolean) {
+        Pal.dark = dark
+        store.saveDark(dark)
+    }
+
+    fun finishWelcome() {
+        welcomed = true
+        store.saveWelcomed()
+    }
 
     fun chooseEngine(e: String) {
         engine = e

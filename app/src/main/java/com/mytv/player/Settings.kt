@@ -53,7 +53,7 @@ private fun SettingsTabs(labels: List<String>, current: Int, onSelect: (Int) -> 
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.6.sp,
-                    color = if (i == current) Color.White else Dim,
+                    color = if (i == current) Txt else Dim,
                 )
                 Box(Modifier.fillMaxWidth().height(2.dp).background(if (i == current) Accent else Color.Transparent))
             }
@@ -102,6 +102,13 @@ fun SettingsScreen(vm: MainVm, onBack: () -> Unit, onPlaylists: () -> Unit) {
                     }
                 }
                 1 -> {
+                    Card(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Label("Appearance")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Pill("Dark", Pal.dark, { vm.chooseDark(true) })
+                            Pill("Light", !Pal.dark, { vm.chooseDark(false) })
+                        }
+                    }
                     Card(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Label("Player")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

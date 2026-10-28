@@ -52,6 +52,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -84,20 +85,30 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(
-                colorScheme = darkColorScheme(
-                    primary = Accent,
-                    onPrimary = Color.White,
-                    background = Bg,
-                    surface = Bg,
-                    onSurface = Txt,
-                    onBackground = Txt,
-                    surfaceVariant = Color(0xFF1B2433),
-                    surfaceContainer = Color(0xFF172131),
-                    surfaceContainerHigh = Color(0xFF172131),
-                    secondaryContainer = Sel,
-                )
-            ) {
+            val scheme = if (Pal.dark) darkColorScheme(
+                primary = Accent,
+                onPrimary = Color.White,
+                background = Bg,
+                surface = Bg,
+                onSurface = Txt,
+                onBackground = Txt,
+                surfaceVariant = Color(0xFF1B2433),
+                surfaceContainer = Color(0xFF172131),
+                surfaceContainerHigh = Color(0xFF172131),
+                secondaryContainer = Sel,
+            ) else lightColorScheme(
+                primary = Accent,
+                onPrimary = Color.White,
+                background = Bg,
+                surface = Bg,
+                onSurface = Txt,
+                onBackground = Txt,
+                surfaceVariant = Color(0xFFE3E9EF),
+                surfaceContainer = Color.White,
+                surfaceContainerHigh = Color.White,
+                secondaryContainer = Sel,
+            )
+            MaterialTheme(colorScheme = scheme) {
                 CompositionLocalProvider(LocalContentColor provides Txt) {
                     App()
                 }
@@ -149,6 +160,11 @@ fun App(vm: MainVm = viewModel()) {
             onWatched = { vm.watched(it) },
             onHeight = { c, h -> vm.learnHeight(c, h) },
         )
+        return
+    }
+
+    if (!vm.welcomed) {
+        AppBackground { WelcomeScreen { vm.finishWelcome() } }
         return
     }
 
@@ -272,6 +288,8 @@ fun HomeScreen(
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
+                NetSpeed()
+                ClockText(Modifier.padding(horizontal = 6.dp))
                 IconBtn(
                     if (searching) Icons.Default.Close else Icons.Default.Search,
                     "Search",
@@ -399,7 +417,7 @@ private fun SearchField(value: String, onChange: (String) -> Unit, modifier: Mod
         modifier
             .height(40.dp)
             .clip(RoundedCornerShape(50))
-            .background(Color(0x33FFFFFF))
+            .background(Veil)
             .padding(horizontal = 16.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -460,7 +478,7 @@ private fun CategoryItem(label: String, selected: Boolean, onClick: () -> Unit) 
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 0.5.sp,
-            color = if (selected) Color.White else Txt.copy(alpha = 0.8f),
+            color = if (selected) OnSel else Txt.copy(alpha = 0.8f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

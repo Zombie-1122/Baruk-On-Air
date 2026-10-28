@@ -26,6 +26,8 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,22 +46,34 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.net.TrafficStats
+import android.os.Process
+import android.os.SystemClock
 import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
+import java.util.Locale
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-// ---- palette (navy + blue, like the reference screenshot) ----
-val Bg = Color(0xFF0F1620)
-val Panel = Color(0xCC141C28)
-val Accent = Color(0xFF0E8C7F)       // muted teal (was blue)
-val AccentLight = Color(0xFF5FD3C4)  // text/marks on dark
-val Sel = Color(0xCC15363A)
+// ---- palette: dark (default) or light, switched in Settings. Getters read Compose state, so screens recolor live. ----
+object Pal {
+    var dark by mutableStateOf(true)
+}
+
+val Bg get() = if (Pal.dark) Color(0xFF0F1620) else Color(0xFFF1F4F8)
+val Panel get() = if (Pal.dark) Color(0xCC141C28) else Color(0xE6FFFFFF)
+val Accent = Color(0xFF0E8C7F)       // muted teal
+val AccentLight get() = if (Pal.dark) Color(0xFF5FD3C4) else Color(0xFF0B7A6F)  // text/marks
+val Sel get() = if (Pal.dark) Color(0xCC15363A) else Color(0xFFD3EEEA)
 val SelBorder = Color(0xFF2E8B83)
-val Txt = Color(0xFFE8EDF4)
-val Dim = Color(0xFF8C99AB)
+val OnSel get() = if (Pal.dark) Color.White else Color(0xFF0A3A35)
+val Txt get() = if (Pal.dark) Color(0xFFE8EDF4) else Color(0xFF16212C)
+val Dim get() = if (Pal.dark) Color(0xFF8C99AB) else Color(0xFF5A6877)
 val Heart = Color(0xFFFF5A5F)
-val Hair = Color(0x22FFFFFF)
+val Hair get() = if (Pal.dark) Color(0x22FFFFFF) else Color(0x22000000)
+/** faint tint for fields/tracks that works on both themes */
+val Veil get() = if (Pal.dark) Color(0x33FFFFFF) else Color(0x14000000)
 
 /** Night-village photo, darkened so text stays readable. Drawn once, behind every non-player screen. */
 @Composable
@@ -74,7 +88,10 @@ fun AppBackground(content: @Composable BoxScope.() -> Unit) {
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(Color(0xB30B121B), Color(0xE60B121B))))
+                .background(Brush.verticalGradient(
+                        if (Pal.dark) listOf(Color(0xB30B121B), Color(0xE60B121B))
+                        else listOf(Color(0xE6F1F4F8), Color(0xF2F1F4F8))
+                    ))
         )
         content()
     }
@@ -100,7 +117,7 @@ fun Pill(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifie
             .height(36.dp)
             .clip(shape)
             .background(if (selected) Accent else Color.Transparent)
-            .then(if (selected) Modifier else Modifier.border(1.dp, Color(0x55FFFFFF), shape))
+            .then(if (selected) Modifier else Modifier.border(1.dp, Txt.copy(alpha = 0.35f), shape))
             .tvFocus(shape)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp),
@@ -160,7 +177,7 @@ fun Logo(url: String?, name: String, size: Dp, fit: Boolean = true, width: Dp = 
         )
     } else {
         Box(
-            Modifier.size(width, size).clip(RoundedCornerShape(10.dp)).background(Color(0x22FFFFFF)),
+            Modifier.size(width, size).clip(RoundedCornerShape(10.dp)).background(Veil),
             contentAlignment = Alignment.Center,
         ) {
             Text(name.take(1).uppercase(), color = Dim, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
@@ -170,7 +187,7 @@ fun Logo(url: String?, name: String, size: Dp, fit: Boolean = true, width: Dp = 
 
 @Composable
 fun Bar(fraction: Float, modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x33FFFFFF))) {
+    Box(modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Veil)) {
         Box(
             Modifier
                 .fillMaxHeight()
@@ -218,8 +235,9 @@ fun ScreenFrame(
                     fontSize = 20.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
-                    modifier = Modifier.padding(start = 8.dp),
+                    modifier = Modifier.padding(start = 8.dp).weight(1f),
                 )
+                ClockText()
             }
             if (busy) {
                 LinearProgressIndicator(
@@ -237,3 +255,70 @@ fun ScreenFrame(
 private val HM: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
 fun hm(ms: Long): String = HM.format(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()))
+
+private val CLOCK: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
+private val DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE, MMM d")
+
+/** Time on top, date underneath, like the reference player. Ticks by itself. */
+@Composable
+fun ClockText(
+    modifier: Modifier = Modifier,
+    color: Color = Txt,
+    dim: Color = Dim,
+    align: Alignment.Horizontal = Alignment.End,
+) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(10_000)
+        }
+    }
+    val t = Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault())
+    Column(modifier, horizontalAlignment = align) {
+        Text(CLOCK.format(t), color = color, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(DATE.format(t), color = dim, fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+private fun rxBytes(uid: Int): Long {
+    val u = TrafficStats.getUidRxBytes(uid)
+    return if (u >= 0) u else TrafficStats.getTotalRxBytes()
+}
+
+/** Small outlined label (used for network speed and resolution). */
+@Composable
+fun InfoPill(text: String, modifier: Modifier = Modifier, color: Color = Txt) {
+    Box(
+        modifier
+            .height(30.dp)
+            .clip(RoundedCornerShape(50))
+            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(50))
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text.uppercase(), color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp, maxLines = 1)
+    }
+}
+
+/** Live download speed of this app (updates every second). */
+@Composable
+fun NetSpeed(modifier: Modifier = Modifier, color: Color = Txt) {
+    var bps by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        val uid = Process.myUid()
+        var last = rxBytes(uid)
+        var lastT = SystemClock.elapsedRealtime()
+        while (true) {
+            delay(1000)
+            val cur = rxBytes(uid)
+            val t = SystemClock.elapsedRealtime()
+            bps = ((cur - last) * 8000L / (t - lastT).coerceAtLeast(1L)).coerceAtLeast(0L)
+            last = cur
+            lastT = t
+        }
+    }
+    val label = if (bps >= 1_000_000L) String.format(Locale.US, "%.1f Mbps", bps / 1_000_000f)
+    else String.format(Locale.US, "%d Kbps", bps / 1000L)
+    InfoPill("\u2193 $label", modifier, color)
+}

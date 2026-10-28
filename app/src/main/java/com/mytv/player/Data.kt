@@ -251,6 +251,12 @@ class Store(private val ctx: Context) {
     fun sort(): Sort = Sort.of(p.getString("sort", null))
     fun saveSort(s: Sort) = p.edit().putString("sort", s.id).apply()
 
+    fun dark(): Boolean = p.getBoolean("dark", true)
+    fun saveDark(b: Boolean) = p.edit().putBoolean("dark", b).apply()
+
+    fun welcomed(): Boolean = p.getBoolean("welcomed", false)
+    fun saveWelcomed() = p.edit().putBoolean("welcomed", true).apply()
+
     fun repo(): String = p.getString("repo", null) ?: BuildConfig.REPO
     fun saveRepo(r: String) = p.edit().putString("repo", r).apply()
 }

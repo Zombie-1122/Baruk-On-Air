@@ -11,6 +11,13 @@ import android.util.Base64
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -129,6 +136,8 @@ private class PlayState {
 
     // tracks / quality
     var tracks by mutableStateOf(Tracks.EMPTY)
+    var vw by mutableIntStateOf(0)          // size of the picture being shown
+    var vh by mutableIntStateOf(0)
     var maxHeight by mutableIntStateOf(0)   // tallest video track seen for the current channel
     var codecAlt by mutableStateOf(false)   // "Switch codec": prefer the other decoder
     var loadedUrl: String? = null           // url that the player is really playing right now
@@ -157,6 +166,19 @@ private fun fmt(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
 }
 
+/** Remembered while the app is open so the chosen brightness sticks between channels. -1 = system default. */
+private var savedBright = -1f
+
+private val PSel = Color(0xCC15363A)
+private val PDim = Color(0xFF8C99AB)
+private val PAccent = Color(0xFF5FD3C4)
+private val PBtnBg = Color(0x99121A24)
+private val PBtnLine = Color(0x33FFFFFF)
+
+private fun systemBrightness(ctx: Context): Float = runCatching {
+    android.provider.Settings.System.getInt(ctx.contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255f
+}.getOrDefault(0.5f)
+
 @Composable
 fun PlayerScreen(
     channels: List<Channel>,
@@ -177,9 +199,13 @@ fun PlayerScreen(
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, channels.lastIndex)) }
     var controls by remember { mutableStateOf(true) }
     var tick by remember { mutableIntStateOf(0) }
-    var panel by remember { mutableStateOf(false) }
+    // 0 none, 1 quality, 2 audio, 3 subtitles, 4 guide, 5 brightness
+    var panel by remember { mutableIntStateOf(0) }
+    var keyNav by remember { mutableStateOf(false) } // controls were opened with a remote -> focus the play button
+    var bright by remember { mutableFloatStateOf(savedBright) }
     val st = remember { PlayState() }
     val focus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
     val ch = channels[index]
     val isVod = st.dur > 0L // known duration = recorded video; live streams report 0
 
@@ -190,6 +216,8 @@ fun PlayerScreen(
         st.pos = 0L
         st.dur = 0L
         st.maxHeight = 0
+        st.vw = 0
+        st.vh = 0
         index = (i + channels.size) % channels.size
         tick++
     }
@@ -205,7 +233,7 @@ fun PlayerScreen(
         if (st.maxHeight > 0) onHeight(ch, st.maxHeight)
     }
     val quality = qualityLabel(st.maxHeight) ?: nameQuality(ch.name)
-    BackHandler(enabled = panel) { panel = false }
+    BackHandler(enabled = panel != 0) { panel = 0 }
 
     // count it as "watched" (for Frequency sort) only after a few seconds, so channel surfing doesn't count
     LaunchedEffect(ch.url) {
@@ -222,24 +250,50 @@ fun PlayerScreen(
         }
     }
 
-    // when controls hide, take keyboard/remote focus back
-    LaunchedEffect(controls) {
-        if (!controls) runCatching { focus.requestFocus() }
+    // focus: hidden controls -> the screen itself (remote up/down = channel); remote-opened controls -> play button
+    LaunchedEffect(controls, keyNav) {
+        if (!controls) {
+            runCatching { focus.requestFocus() }
+        } else if (keyNav) {
+            delay(120)
+            runCatching { playFocus.requestFocus() }
+        }
     }
     LaunchedEffect(Unit) {
         runCatching { focus.requestFocus() }
     }
 
+    // screen brightness (window level, restored when you leave the player)
+    val window = activity?.window
+    val originalBright = remember { window?.attributes?.screenBrightness ?: -1f }
+    LaunchedEffect(bright) {
+        window?.let { w ->
+            val lp = w.attributes
+            lp.screenBrightness = bright
+            w.attributes = lp
+        }
+        savedBright = bright
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            window?.let { w ->
+                val lp = w.attributes
+                lp.screenBrightness = originalBright
+                w.attributes = lp
+            }
+        }
+    }
+
     // fullscreen + keep screen on; cleanup
     DisposableEffect(Unit) {
-        val window = activity?.window
-        val ic = window?.let { WindowCompat.getInsetsController(it, view) }
+        val w = activity?.window
+        val ic = w?.let { WindowCompat.getInsetsController(it, view) }
         ic?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         ic?.hide(WindowInsetsCompat.Type.systemBars())
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        w?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             ic?.show(WindowInsetsCompat.Type.systemBars())
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            w?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
@@ -250,7 +304,7 @@ fun PlayerScreen(
             .focusRequester(focus)
             .focusable()
             .onPreviewKeyEvent { e ->
-                if (panel) return@onPreviewKeyEvent false
+                if (panel != 0) return@onPreviewKeyEvent false
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 if (controls) {
                     tick++
@@ -266,14 +320,15 @@ fun PlayerScreen(
                         true
                     }
                     Key.DirectionLeft -> {
-                        if (isVod) skip(-10_000L) else { controls = true; tick++ }
+                        if (isVod) skip(-10_000L) else { keyNav = true; controls = true; tick++ }
                         true
                     }
                     Key.DirectionRight -> {
-                        if (isVod) skip(10_000L) else { controls = true; tick++ }
+                        if (isVod) skip(10_000L) else { keyNav = true; controls = true; tick++ }
                         true
                     }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        keyNav = true
                         controls = true
                         tick++
                         true
@@ -284,11 +339,11 @@ fun PlayerScreen(
     ) {
         ExoSurface(ch, st)
 
-        // radio: show a big label instead of an empty black screen
-        if (ch.kind == Kind.RADIO) {
+        // radio: show the logo and name instead of an empty black screen
+        if (ch.kind == Kind.RADIO && !controls) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("📻", fontSize = 64.sp)
-                Text(ch.name, color = Color.White, fontSize = 20.sp)
+                Logo(ch.logo, ch.name, 84.dp, width = 140.dp)
+                Text(ch.name, color = Color.White, fontSize = 20.sp, modifier = Modifier.padding(top = 10.dp))
             }
         }
 
@@ -298,8 +353,9 @@ fun PlayerScreen(
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectTapGestures {
-                        if (panel) {
-                            panel = false
+                        keyNav = false
+                        if (panel != 0) {
+                            panel = 0
                         } else {
                             controls = !controls
                             tick++
@@ -308,7 +364,7 @@ fun PlayerScreen(
                 }
         )
 
-        if (st.buffering && st.error == null) {
+        if (st.buffering && st.error == null && !controls) {
             CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
         }
 
@@ -334,24 +390,27 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(visible = controls, modifier = Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                // top bar
+            Box(Modifier.fillMaxSize()) {
+                // ---- top bar: back, channel logo + name, clock, speed, resolution, favourite ----
                 Row(
                     Modifier
+                        .align(Alignment.TopCenter)
                         .fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)))
-                        .padding(8.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
-                    }
+                    RoundBtn(44.dp, onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+                    Logo(ch.logo, ch.name, 40.dp, width = 56.dp)
                     val nowProg = if (ch.kind == Kind.LIVE) epg.of(ch).nowAt(System.currentTimeMillis()) else null
-                    Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                    Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 ch.name,
                                 color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
@@ -361,18 +420,19 @@ fun PlayerScreen(
                                 QualityBadge(quality)
                             }
                         }
-                        if (nowProg != null) {
-                            Text(
-                                "${hm(nowProg.start)} - ${hm(nowProg.stop)}  ${nowProg.title}",
-                                color = Color(0xCCFFFFFF),
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                        Text(
+                            if (nowProg != null) "${hm(nowProg.start)} - ${hm(nowProg.stop)}  ${nowProg.title}" else ch.group,
+                            color = Color(0xCCFFFFFF),
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
+                    ClockText(color = Color.White, dim = Color(0xCCFFFFFF))
+                    NetSpeed(color = Color.White)
+                    if (st.vw > 0 && st.vh > 0) InfoPill("${st.vw}x${st.vh}", color = Color.White)
                     val fav = ch.url in favorites
-                    IconButton(onClick = { onFav(ch); tick++ }) {
+                    RoundBtn(44.dp, { onFav(ch); tick++ }) {
                         Icon(
                             if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             "Favorite",
@@ -381,12 +441,37 @@ fun PlayerScreen(
                     }
                 }
 
-                // bottom bar
+                // ---- centre: previous / play-pause / next ----
+                Row(
+                    Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(26.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RoundBtn(52.dp, { go(index - 1) }) { Text("⏮", fontSize = 22.sp, color = Color.White) }
+                    if (isVod) RoundBtn(44.dp, { skip(-10_000L) }) { Text("-10", fontSize = 13.sp, color = Color.White) }
+                    RoundBtn(
+                        76.dp,
+                        { st.toggle?.invoke(); tick++ },
+                        modifier = Modifier.focusRequester(playFocus),
+                        fill = Accent,
+                    ) {
+                        if (st.buffering && st.error == null) {
+                            CircularProgressIndicator(Modifier.size(32.dp), color = Color.White, strokeWidth = 3.dp)
+                        } else {
+                            PlayPause(st.playWhenReady)
+                        }
+                    }
+                    if (isVod) RoundBtn(44.dp, { skip(10_000L) }) { Text("+10", fontSize = 13.sp, color = Color.White) }
+                    RoundBtn(52.dp, { go(index + 1) }) { Text("⏭", fontSize = 22.sp, color = Color.White) }
+                }
+
+                // ---- bottom: LIVE pill + one tidy row of actions ----
                 Column(
                     Modifier
+                        .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
-                        .padding(8.dp),
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                 ) {
                     if (isVod && st.dur > 0) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -398,6 +483,7 @@ fun PlayerScreen(
                                     tick++
                                 },
                                 valueRange = 0f..st.dur.toFloat(),
+                                colors = SliderDefaults.colors(thumbColor = PAccent, activeTrackColor = Accent),
                                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                             )
                             Text(fmt(st.dur), color = Color.White, fontSize = 12.sp)
@@ -405,47 +491,103 @@ fun PlayerScreen(
                     }
                     Row(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        TextButton(onClick = { go(index - 1) }) { Text("⏮", fontSize = 26.sp, color = Color.White) }
-                        if (isVod) {
-                            TextButton(onClick = { skip(-10_000L) }) { Text("-10s", color = Color.White) }
+                        if (!isVod) LivePill()
+                        Row(
+                            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            PBtn("Audio", { panel = 2; controls = false })
+                            if (ch.kind == Kind.LIVE) {
+                                PBtn("Subtitles", { panel = 3; controls = false })
+                                PBtn("Quality" + (quality?.let { " · $it" } ?: ""), { panel = 1; controls = false })
+                                PBtn("Scale: " + listOf("Fit", "Zoom", "Fill")[st.resizeIdx], {
+                                    st.resizeIdx = (st.resizeIdx + 1) % 3
+                                    tick++
+                                })
+                                PBtn("Guide", { panel = 4; controls = false })
+                            }
+                            PBtn("Brightness", { panel = 5; controls = false })
+                            PBtn("Open in app", { onExternal(ch) })
                         }
-                        TextButton(onClick = {
-                            st.toggle?.invoke()
-                            tick++
-                        }) { PlayPause(st.playWhenReady) }
-                        if (isVod) {
-                            TextButton(onClick = { skip(10_000L) }) { Text("+10s", color = Color.White) }
-                        }
-                        TextButton(onClick = { go(index + 1) }) { Text("⏭", fontSize = 26.sp, color = Color.White) }
-                    }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        TextButton(onClick = {
-                            st.resizeIdx = (st.resizeIdx + 1) % 3
-                            tick++
-                        }) { Text("Zoom", color = Color.White) }
-                        TextButton(onClick = { panel = true; controls = false }) { Text("Tracks", color = Color.White) }
-                        TextButton(onClick = { onExternal(ch) }) { Text("Open in app", color = Color.White) }
                     }
                 }
             }
         }
 
-        if (panel) {
-            TracksPanel(
+        when (panel) {
+            1, 2, 3 -> TracksPanel(
+                startPage = panel,
                 name = ch.name,
                 quality = quality,
                 st = st,
-                onClose = { panel = false },
+                onClose = { panel = 0 },
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
+            4 -> GuidePanel(ch, epg, { panel = 0 }, Modifier.align(Alignment.CenterEnd))
+            5 -> {
+                val sys = remember { systemBrightness(ctx) }
+                BrightPanel(
+                    level = if (bright < 0f) sys else bright,
+                    auto = bright < 0f,
+                    onChange = { bright = it },
+                    onClose = { panel = 0 },
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun RoundBtn(
+    size: Dp,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    fill: Color = PBtnBg,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(fill)
+            .border(1.dp, PBtnLine, CircleShape)
+            .tvFocus(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+@Composable
+private fun PBtn(text: String, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        Modifier
+            .height(42.dp)
+            .clip(shape)
+            .background(PBtnBg)
+            .border(1.dp, PBtnLine, shape)
+            .tvFocus(shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun LivePill() {
+    Row(
+        Modifier.height(34.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFFE0245E)).padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(Color.White))
+        Spacer(Modifier.width(8.dp))
+        Text("LIVE", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
     }
 }
 
@@ -458,6 +600,115 @@ private fun PlayPause(playing: Boolean) {
             }
         } else {
             Icon(Icons.Default.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(34.dp))
+        }
+    }
+}
+
+// ---------------------------------------------------------------- side panels (guide, brightness)
+
+@Composable
+private fun SidePanel(
+    title: String,
+    onClose: () -> Unit,
+    modifier: Modifier,
+    width: Float = 0.48f,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier
+            .fillMaxHeight()
+            .fillMaxWidth(width)
+            .background(Color(0xF0172131))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconBtn(Icons.AutoMirrored.Filled.ArrowBack, "Back", onClose, tint = Color.White)
+            Text(
+                title,
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.width(44.dp))
+        }
+        content()
+    }
+}
+
+/** Current programme in full, then what's on next. */
+@Composable
+private fun GuidePanel(ch: Channel, epg: EpgIndex, onClose: () -> Unit, modifier: Modifier) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(20_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val progs = epg.of(ch)
+    val cur = progs.nowAt(now)
+    val next = progs.upcoming(now, 24)
+    SidePanel("TV Guide", onClose, modifier) {
+        Row(
+            Modifier.padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Logo(ch.logo, ch.name, 34.dp, width = 48.dp)
+            Text(ch.name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (cur == null && next.isEmpty()) {
+                Text("No programme info for this channel", color = PDim, fontSize = 14.sp, modifier = Modifier.padding(vertical = 12.dp))
+            }
+            if (cur != null) {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(PSel).padding(14.dp)) {
+                    Text("NOW", color = PAccent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+                    Text(cur.title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
+                    Text("${hm(cur.start)} - ${hm(cur.stop)}", color = PDim, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+                    Bar((now - cur.start).toFloat() / (cur.stop - cur.start).coerceAtLeast(1), Modifier.padding(vertical = 8.dp))
+                    if (cur.desc.isNotBlank()) {
+                        Text(cur.desc, color = Color(0xCCFFFFFF), fontSize = 13.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+            }
+            if (next.isNotEmpty()) {
+                Text("NEXT", color = PDim, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+                for (p in next) {
+                    Row(Modifier.padding(vertical = 6.dp)) {
+                        Text(hm(p.start), color = PAccent, fontSize = 13.sp, modifier = Modifier.width(56.dp))
+                        Text(p.title, color = Color.White, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BrightPanel(level: Float, auto: Boolean, onChange: (Float) -> Unit, onClose: () -> Unit, modifier: Modifier) {
+    SidePanel("Brightness", onClose, modifier, width = 0.42f) {
+        Column(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.Center) {
+            Text(
+                if (auto) "Auto (system)" else "${(level * 100).toInt()}%",
+                color = Color.White,
+                fontSize = 15.sp,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+            Slider(
+                value = level.coerceIn(0.03f, 1f),
+                onValueChange = onChange,
+                valueRange = 0.03f..1f,
+                colors = SliderDefaults.colors(thumbColor = PAccent, activeTrackColor = Accent),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                PBtn("Auto", { onChange(-1f) })
+                PBtn("Night", { onChange(0.06f) })
+                PBtn("Full", { onChange(1f) })
+            }
         }
     }
 }
@@ -500,8 +751,8 @@ private fun audioLabel(f: Format, n: Int): String {
 private fun textLabel(f: Format, n: Int): String = f.label ?: langName(f) ?: "Subtitle $n"
 
 @Composable
-private fun TracksPanel(name: String, quality: String?, st: PlayState, onClose: () -> Unit, modifier: Modifier) {
-    var page by remember { mutableIntStateOf(0) } // 0 overview, 1 video, 2 audio, 3 subtitles
+private fun TracksPanel(startPage: Int, name: String, quality: String?, st: PlayState, onClose: () -> Unit, modifier: Modifier) {
+    var page by remember(startPage) { mutableIntStateOf(startPage) } // 0 overview, 1 quality, 2 audio, 3 subtitles
     val first = remember { FocusRequester() }
     LaunchedEffect(page) { runCatching { first.requestFocus() } }
 
@@ -509,7 +760,7 @@ private fun TracksPanel(name: String, quality: String?, st: PlayState, onClose: 
     val video = rowsOf(groups.filter { it.type == C.TRACK_TYPE_VIDEO }).sortedBy { it.format.height }
     val audio = rowsOf(groups.filter { it.type == C.TRACK_TYPE_AUDIO })
     val text = rowsOf(groups.filter { it.type == C.TRACK_TYPE_TEXT })
-    val titles = listOf("Media tracks", "Video", "Audio", "Subtitles")
+    val titles = listOf("Media tracks", "Quality", "Audio", "Subtitles")
 
     Column(
         modifier
@@ -519,7 +770,7 @@ private fun TracksPanel(name: String, quality: String?, st: PlayState, onClose: 
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconBtn(Icons.AutoMirrored.Filled.ArrowBack, "Back", { if (page == 0) onClose() else page = 0 })
+            IconBtn(Icons.AutoMirrored.Filled.ArrowBack, "Back", { if (page == 0 || startPage != 0) onClose() else page = 0 }, tint = Color.White)
             Text(
                 titles[page],
                 color = Color.White,
@@ -575,9 +826,14 @@ private fun TracksPanel(name: String, quality: String?, st: PlayState, onClose: 
                             st.select?.invoke(C.TRACK_TYPE_VIDEO, r.group, r.index)
                         }
                     }
+                    PanelRow(
+                        title = "Switch codec",
+                        lines = listOf(if (st.codecAlt) "Decoder: alternative (tap to go back)" else "Decoder: default - tap if the picture is broken"),
+                        onClick = { st.codecAlt = !st.codecAlt },
+                    )
                 }
                 2 -> {
-                    if (audio.isEmpty()) Text("No audio tracks", color = Dim, modifier = Modifier.padding(16.dp))
+                    if (audio.isEmpty()) Text("No audio tracks", color = PDim, modifier = Modifier.padding(16.dp))
                     audio.forEachIndexed { i, r ->
                         ChoiceRow(audioLabel(r.format, i + 1), r.selected, if (i == 0) first else null) {
                             st.select?.invoke(C.TRACK_TYPE_AUDIO, r.group, r.index)
@@ -625,14 +881,14 @@ private fun ChoiceRow(label: String, selected: Boolean, requester: FocusRequeste
             .fillMaxWidth()
             .padding(vertical = 2.dp)
             .clip(shape)
-            .background(if (selected) Sel else Color.Transparent)
+            .background(if (selected) PSel else Color.Transparent)
             .tvFocus(shape)
             .then(if (requester != null) Modifier.focusRequester(requester) else Modifier)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(if (selected) "\u25CF" else "\u25CB", color = if (selected) AccentLight else Dim, fontSize = 14.sp)
+        Text(if (selected) "\u25CF" else "\u25CB", color = if (selected) PAccent else PDim, fontSize = 14.sp)
         Spacer(Modifier.width(12.dp))
         Text(label, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
@@ -760,7 +1016,10 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
-                if (st.loadedUrl == chNow.url && videoSize.height > st.maxHeight) st.maxHeight = videoSize.height
+                if (st.loadedUrl != chNow.url) return
+                st.vw = videoSize.width
+                st.vh = videoSize.height
+                if (videoSize.height > st.maxHeight) st.maxHeight = videoSize.height
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -825,6 +1084,8 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
         st.error = null
         st.buffering = true
         st.maxHeight = 0
+        st.vw = 0
+        st.vh = 0
         st.tracks = Tracks.EMPTY
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(ch.userAgent ?: UA_LIST[st.uaIdx.coerceIn(0, UA_LIST.lastIndex)])
