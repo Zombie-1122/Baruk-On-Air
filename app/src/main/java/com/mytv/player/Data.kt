@@ -251,6 +251,25 @@ class Store(private val ctx: Context) {
     fun sort(): Sort = Sort.of(p.getString("sort", null))
     fun saveSort(s: Sort) = p.edit().putString("sort", s.id).apply()
 
+    /** When each channel first showed up (short hash of its url -> millis). 0 = was already there on first run. */
+    fun seen(): Map<String, Long> {
+        val raw = p.getString("seen", "") ?: ""
+        if (raw.isEmpty()) return emptyMap()
+        val m = HashMap<String, Long>()
+        for (part in raw.split(',')) {
+            val i = part.indexOf(':')
+            if (i > 0) m[part.substring(0, i)] = part.substring(i + 1).toLongOrNull() ?: 0L
+        }
+        return m
+    }
+
+    fun saveSeen(m: Map<String, Long>) =
+        p.edit().putString("seen", m.entries.joinToString(",") { "${it.key}:${it.value}" }).apply()
+
+    /** Channels that failed to play (urls). Cleared automatically when they play again. */
+    fun dead(): Set<String> = p.getStringSet("dead", emptySet())!!.toSet()
+    fun saveDead(s: Set<String>) = p.edit().putStringSet("dead", s).apply()
+
     fun dark(): Boolean = p.getBoolean("dark", true)
     fun saveDark(b: Boolean) = p.edit().putBoolean("dark", b).apply()
 

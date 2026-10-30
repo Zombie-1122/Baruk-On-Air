@@ -61,15 +61,16 @@ object Pal {
     var dark by mutableStateOf(true)
 }
 
-val Bg get() = if (Pal.dark) Color(0xFF0F1620) else Color(0xFFF1F4F8)
-val Panel get() = if (Pal.dark) Color(0xCC141C28) else Color(0xE6FFFFFF)
-val Accent = Color(0xFF0E8C7F)       // muted teal
-val AccentLight get() = if (Pal.dark) Color(0xFF5FD3C4) else Color(0xFF0B7A6F)  // text/marks
-val Sel get() = if (Pal.dark) Color(0xCC15363A) else Color(0xFFD3EEEA)
-val SelBorder = Color(0xFF2E8B83)
-val OnSel get() = if (Pal.dark) Color.White else Color(0xFF0A3A35)
-val Txt get() = if (Pal.dark) Color(0xFFE8EDF4) else Color(0xFF16212C)
-val Dim get() = if (Pal.dark) Color(0xFF8C99AB) else Color(0xFF5A6877)
+val Bg get() = if (Pal.dark) Color(0xFF000000) else Color(0xFFFAF7EE)
+val Panel get() = if (Pal.dark) Color(0xCC121212) else Color(0xE6FFFFFF)
+val Accent = Color(0xFFFFC400)       // yellow
+val OnAccent = Color(0xFF111111)     // text/icons on yellow
+val AccentLight get() = if (Pal.dark) Color(0xFFFFD54F) else Color(0xFF8A6700)  // text/marks
+val Sel get() = if (Pal.dark) Color(0xCC2B2300) else Color(0xFFFFF0B8)
+val SelBorder = Color(0xFFC9A000)
+val OnSel get() = if (Pal.dark) Color.White else Color(0xFF3A2E00)
+val Txt get() = if (Pal.dark) Color(0xFFF2F2F2) else Color(0xFF1A1A1A)
+val Dim get() = if (Pal.dark) Color(0xFF9A9A9A) else Color(0xFF666666)
 val Heart = Color(0xFFFF5A5F)
 val Hair get() = if (Pal.dark) Color(0x22FFFFFF) else Color(0x22000000)
 /** faint tint for fields/tracks that works on both themes */
@@ -89,8 +90,8 @@ fun AppBackground(content: @Composable BoxScope.() -> Unit) {
             Modifier
                 .fillMaxSize()
                 .background(Brush.verticalGradient(
-                        if (Pal.dark) listOf(Color(0xB30B121B), Color(0xE60B121B))
-                        else listOf(Color(0xE6F1F4F8), Color(0xF2F1F4F8))
+                        if (Pal.dark) listOf(Color(0xB3000000), Color(0xEB000000))
+                        else listOf(Color(0xE6FAF7EE), Color(0xF2FAF7EE))
                     ))
         )
         content()
@@ -125,7 +126,7 @@ fun Pill(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifie
     ) {
         Text(
             text.uppercase(),
-            color = if (selected) Color.White else Txt,
+            color = if (selected) OnAccent else Txt,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 0.6.sp,

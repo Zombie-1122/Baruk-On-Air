@@ -159,15 +159,16 @@ private fun DonateDialog(onClose: () -> Unit) {
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("Thank you for your support", color = Color(0xFF16212C), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("Donate with PayPal", color = Color(0xFF16212C), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("chez sid", color = Color(0xFF5A6877), fontSize = 13.sp)
             Image(
                 painterResource(R.drawable.donate_qr),
-                contentDescription = "Donation QR code",
+                contentDescription = "PayPal donation QR code",
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.height((h * 0.66f).dp.coerceAtMost(420.dp)),
+                modifier = Modifier.height((h * 0.62f).dp.coerceAtMost(380.dp)),
             )
             Text(
-                "Scan with any banking app or eWallet",
+                "Scan with the PayPal app. Thank you for your support!",
                 color = Color(0xFF5A6877),
                 fontSize = 12.sp,
                 modifier = Modifier.padding(bottom = 2.dp),

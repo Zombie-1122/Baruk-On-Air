@@ -110,6 +110,16 @@ fun SettingsScreen(vm: MainVm, onBack: () -> Unit, onPlaylists: () -> Unit) {
                         }
                     }
                     Card(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Label("Offline channels")
+                        Text(
+                            if (vm.dead.isEmpty()) "No channels marked offline. A channel that fails to play is tagged OFFLINE in the list, and the tag clears itself when it plays again."
+                            else "${vm.dead.size} channel(s) are tagged OFFLINE after failing to play.",
+                            color = Dim,
+                            fontSize = 13.sp,
+                        )
+                        if (vm.dead.isNotEmpty()) Pill("Clear tags", false, { vm.clearDead() })
+                    }
+                    Card(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Label("Player")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             for ((id, label) in listOf("exo" to "Built-in", "external" to "External app")) {
@@ -127,7 +137,7 @@ fun SettingsScreen(vm: MainVm, onBack: () -> Unit, onPlaylists: () -> Unit) {
                         Text("BarukOnAir - build ${BuildConfig.VERSION_CODE}", fontWeight = FontWeight.SemiBold)
                         val u = vm.update
                         if (u != null) {
-                            Text("New update available: ${u.tag}", color = Accent, fontWeight = FontWeight.SemiBold)
+                            Text("New update available: ${u.tag}", color = AccentLight, fontWeight = FontWeight.SemiBold)
                             if (u.notes.isNotBlank()) Text(u.notes, fontSize = 13.sp)
                             Pill("Download update", true, {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u.apkUrl)))

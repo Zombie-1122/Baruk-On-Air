@@ -6,7 +6,25 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.app.PictureInPictureParams
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
+import android.util.Rational
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 import android.util.Base64
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
@@ -123,6 +141,7 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 /** State shared between the on-screen controls and whichever engine is playing. */
 private class PlayState {
     var buffering by mutableStateOf(true)
+    var ready by mutableStateOf(false)      // has really started playing (used to clear the OFFLINE tag)
     var error by mutableStateOf<String?>(null)
     var playWhenReady by mutableStateOf(true)
     var attempt by mutableIntStateOf(0)
@@ -169,10 +188,11 @@ private fun fmt(ms: Long): String {
 /** Remembered while the app is open so the chosen brightness sticks between channels. -1 = system default. */
 private var savedBright = -1f
 
-private val PSel = Color(0xCC15363A)
+private val PSel = Color(0xCC2B2300)
 private val PDim = Color(0xFF8C99AB)
-private val PAccent = Color(0xFF5FD3C4)
-private val PBtnBg = Color(0x99121A24)
+private val PAccent = Color(0xFFFFD54F)
+private val PBtnBg = Color(0xCC0B0B0B)
+private val PPanel = Color(0xF0111111)
 private val PBtnLine = Color(0x33FFFFFF)
 
 private fun systemBrightness(ctx: Context): Float = runCatching {
@@ -190,6 +210,8 @@ fun PlayerScreen(
     onExternal: (Channel) -> Unit,
     onWatched: (Channel) -> Unit,
     onTune: (Channel) -> Unit,
+    onDead: (Channel) -> Unit,
+    onAlive: (Channel) -> Unit,
     onHeight: (Channel, Int) -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -213,6 +235,7 @@ fun PlayerScreen(
         st.uaIdx = 0
         st.forceHls = false
         st.error = null
+        st.ready = false
         st.pos = 0L
         st.dur = 0L
         st.maxHeight = 0
@@ -234,6 +257,42 @@ fun PlayerScreen(
     }
     val quality = qualityLabel(st.maxHeight) ?: nameQuality(ch.name)
     BackHandler(enabled = panel != 0) { panel = 0 }
+
+    // mark channels that fail (only when the phone is online, so being offline doesn't tag everything) / clear when they play
+    LaunchedEffect(st.error, ch.url) {
+        if (st.error != null && isOnline(ctx)) onDead(ch)
+    }
+    LaunchedEffect(st.ready, ch.url) {
+        if (st.ready) onAlive(ch)
+    }
+
+    // picture-in-picture (live TV only)
+    val pipOk = remember { Build.VERSION.SDK_INT >= 26 && ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) }
+    val canPip = pipOk && ch.kind == Kind.LIVE
+    val inPip = Pip.active
+    val closeNow by rememberUpdatedState(onClose)
+    DisposableEffect(canPip) {
+        Pip.playing = canPip
+        onDispose { Pip.playing = false }
+    }
+    LaunchedEffect(st.vw, st.vh) {
+        if (st.vw > 0 && st.vh > 0) {
+            val r = st.vw.toFloat() / st.vh
+            if (r in 0.45f..2.3f) Pip.setRatio(st.vw, st.vh) else Pip.setRatio(16, 9)
+        }
+    }
+    LaunchedEffect(inPip) {
+        if (inPip) { controls = false; panel = 0 }
+    }
+    // closing the little PiP window stops the activity: stop playing too
+    DisposableEffect(activity) {
+        val owner = activity as? LifecycleOwner
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_STOP && Pip.active) closeNow()
+        }
+        owner?.lifecycle?.addObserver(obs)
+        onDispose { owner?.lifecycle?.removeObserver(obs) }
+    }
 
     // count it as "watched" (for Frequency sort) only after a few seconds, so channel surfing doesn't count
     LaunchedEffect(ch.url) {
@@ -389,7 +448,7 @@ fun PlayerScreen(
             }
         }
 
-        AnimatedVisibility(visible = controls, modifier = Modifier.fillMaxSize()) {
+        AnimatedVisibility(visible = controls && !inPip, modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize()) {
                 // ---- top bar: back, channel logo + name, clock, speed, resolution, favourite ----
                 Row(
@@ -456,7 +515,7 @@ fun PlayerScreen(
                         fill = Accent,
                     ) {
                         if (st.buffering && st.error == null) {
-                            CircularProgressIndicator(Modifier.size(32.dp), color = Color.White, strokeWidth = 3.dp)
+                            CircularProgressIndicator(Modifier.size(32.dp), color = OnAccent, strokeWidth = 3.dp)
                         } else {
                             PlayPause(st.playWhenReady)
                         }
@@ -470,7 +529,7 @@ fun PlayerScreen(
                     Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6000000))))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                 ) {
                     if (isVod && st.dur > 0) {
@@ -495,22 +554,26 @@ fun PlayerScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         if (!isVod) LivePill()
-                        Row(
-                            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            PBtn("Audio", { panel = 2; controls = false })
-                            if (ch.kind == Kind.LIVE) {
-                                PBtn("Subtitles", { panel = 3; controls = false })
-                                PBtn("Quality" + (quality?.let { " · $it" } ?: ""), { panel = 1; controls = false })
-                                PBtn("Scale: " + listOf("Fit", "Zoom", "Fill")[st.resizeIdx], {
-                                    st.resizeIdx = (st.resizeIdx + 1) % 3
-                                    tick++
-                                })
-                                PBtn("Guide", { panel = 4; controls = false })
+                        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                            Row(
+                                Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                PBtn("Audio", { panel = 2; controls = false })
+                                if (ch.kind == Kind.LIVE) {
+                                    PBtn("Subtitles", { panel = 3; controls = false })
+                                    PBtn("Quality" + (quality?.let { " · $it" } ?: ""), { panel = 1; controls = false })
+                                    PBtn(listOf("Fit", "Zoom", "Fill")[st.resizeIdx], {
+                                        st.resizeIdx = (st.resizeIdx + 1) % 3
+                                        tick++
+                                    })
+                                    IconPBtn(0) { panel = 4; controls = false }
+                                }
+                                IconPBtn(1) { panel = 5; controls = false }
+                                if (canPip) IconPBtn(2) { Pip.enter(activity) }
+                                if (ch.kind == Kind.RADIO) PBtn("Open in app", { onExternal(ch) })
                             }
-                            PBtn("Brightness", { panel = 5; controls = false })
-                            PBtn("Open in app", { onExternal(ch) })
                         }
                     }
                 }
@@ -566,18 +629,108 @@ private fun PBtn(text: String, onClick: () -> Unit) {
     val shape = RoundedCornerShape(14.dp)
     Box(
         Modifier
-            .height(42.dp)
+            .height(40.dp)
             .clip(shape)
             .background(PBtnBg)
             .border(1.dp, PBtnLine, shape)
             .tvFocus(shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(text, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
+
+/** Square icon-only button. kind: 0 guide, 1 brightness, 2 picture-in-picture. */
+@Composable
+private fun IconPBtn(kind: Int, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        Modifier
+            .size(40.dp)
+            .clip(shape)
+            .background(PBtnBg)
+            .border(1.dp, PBtnLine, shape)
+            .tvFocus(shape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Glyph(kind) }
+}
+
+@Composable
+private fun Glyph(kind: Int, color: Color = Color.White) {
+    Canvas(Modifier.size(22.dp)) {
+        val s = size.minDimension
+        val w = s * 0.09f
+        when (kind) {
+            0 -> for (i in 0..2) { // programme list
+                val y = s * (0.24f + 0.26f * i)
+                drawCircle(color, w * 0.9f, Offset(s * 0.14f, y))
+                drawLine(color, Offset(s * 0.32f, y), Offset(s * 0.92f, y), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            1 -> { // brightness: sun
+                val c = Offset(s / 2, s / 2)
+                drawCircle(color, s * 0.17f, c)
+                for (k in 0 until 8) {
+                    val a = k * PI / 4
+                    val dx = cos(a).toFloat()
+                    val dy = sin(a).toFloat()
+                    drawLine(
+                        color,
+                        Offset(c.x + dx * s * 0.30f, c.y + dy * s * 0.30f),
+                        Offset(c.x + dx * s * 0.46f, c.y + dy * s * 0.46f),
+                        strokeWidth = w,
+                        cap = StrokeCap.Round,
+                    )
+                }
+            }
+            else -> { // picture-in-picture: screen with a small window
+                drawRoundRect(
+                    color,
+                    topLeft = Offset(s * 0.07f, s * 0.18f),
+                    size = Size(s * 0.86f, s * 0.64f),
+                    cornerRadius = CornerRadius(s * 0.08f),
+                    style = Stroke(w),
+                )
+                drawRoundRect(
+                    color,
+                    topLeft = Offset(s * 0.48f, s * 0.46f),
+                    size = Size(s * 0.33f, s * 0.24f),
+                    cornerRadius = CornerRadius(s * 0.04f),
+                )
+            }
+        }
+    }
+}
+
+/** Picture-in-picture state shared with MainActivity. */
+object Pip {
+    var active by mutableStateOf(false) // the activity is currently shown as the small floating window
+    var playing = false                 // live video is on screen, so leaving the app should float it
+    private var rw = 16
+    private var rh = 9
+
+    fun setRatio(w: Int, h: Int) {
+        rw = w
+        rh = h
+    }
+
+    fun enter(activity: Activity?) {
+        if (activity == null || Build.VERSION.SDK_INT < 26) return
+        runCatching {
+            activity.enterPictureInPictureMode(
+                PictureInPictureParams.Builder().setAspectRatio(Rational(rw, rh)).build()
+            )
+        }
+    }
+}
+
+private fun isOnline(ctx: Context): Boolean = runCatching {
+    val cm = ctx.getSystemService(ConnectivityManager::class.java)
+    val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+    caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+}.getOrDefault(true)
 
 @Composable
 private fun LivePill() {
@@ -596,10 +749,10 @@ private fun PlayPause(playing: Boolean) {
     Box(Modifier.size(34.dp), contentAlignment = Alignment.Center) {
         if (playing) {
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                repeat(2) { Box(Modifier.width(6.dp).height(22.dp).clip(RoundedCornerShape(2.dp)).background(Color.White)) }
+                repeat(2) { Box(Modifier.width(6.dp).height(22.dp).clip(RoundedCornerShape(2.dp)).background(OnAccent)) }
             }
         } else {
-            Icon(Icons.Default.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(34.dp))
+            Icon(Icons.Default.PlayArrow, "Play", tint = OnAccent, modifier = Modifier.size(34.dp))
         }
     }
 }
@@ -618,7 +771,7 @@ private fun SidePanel(
         modifier
             .fillMaxHeight()
             .fillMaxWidth(width)
-            .background(Color(0xF0172131))
+            .background(PPanel)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -766,7 +919,7 @@ private fun TracksPanel(startPage: Int, name: String, quality: String?, st: Play
         modifier
             .fillMaxHeight()
             .fillMaxWidth(0.48f)
-            .background(Color(0xF0172131))
+            .background(PPanel)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -998,6 +1151,7 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
         val l = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 st.buffering = state == Player.STATE_BUFFERING
+                if (state == Player.STATE_READY && st.loadedUrl == chNow.url) st.ready = true
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -1082,6 +1236,7 @@ private fun ExoSurface(ch: Channel, st: PlayState) {
 
     LaunchedEffect(exo, ch.url, st.attempt) {
         st.error = null
+        st.ready = false
         st.buffering = true
         st.maxHeight = 0
         st.vw = 0

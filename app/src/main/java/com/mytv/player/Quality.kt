@@ -39,12 +39,29 @@ fun QualityBadge(label: String?, modifier: Modifier = Modifier) {
     if (label == null) return
     val c = when (label) {
         "SD" -> Dim
-        "HD" -> Color(0xFF6FA8F0)
+        "HD" -> AccentLight
         "FHD" -> Color(0xFF7BD88F)
-        else -> Color(0xFFFFC857)
+        else -> Color(0xFFFF9F43)
     }
     Text(
         label,
+        color = c,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 0.5.sp,
+        maxLines = 1,
+        modifier = modifier
+            .border(1.dp, c, RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    )
+}
+
+/** Red tag for channels that failed to play last time. */
+@Composable
+fun DeadBadge(modifier: Modifier = Modifier) {
+    val c = Color(0xFFFF6B6B)
+    Text(
+        "OFFLINE",
         color = c,
         fontSize = 10.sp,
         fontWeight = FontWeight.Bold,

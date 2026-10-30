@@ -4,6 +4,7 @@ package com.mytv.player
 
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -82,28 +83,40 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
+    // leaving the app while live TV plays: float the picture instead of stopping
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Pip.playing && !Pip.active) Pip.enter(this)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        Pip.active = isInPictureInPictureMode
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             val scheme = if (Pal.dark) darkColorScheme(
                 primary = Accent,
-                onPrimary = Color.White,
+                onPrimary = OnAccent,
                 background = Bg,
                 surface = Bg,
                 onSurface = Txt,
                 onBackground = Txt,
-                surfaceVariant = Color(0xFF1B2433),
-                surfaceContainer = Color(0xFF172131),
-                surfaceContainerHigh = Color(0xFF172131),
+                surfaceVariant = Color(0xFF1E1E1E),
+                surfaceContainer = Color(0xFF181818),
+                surfaceContainerHigh = Color(0xFF181818),
                 secondaryContainer = Sel,
             ) else lightColorScheme(
                 primary = Accent,
-                onPrimary = Color.White,
+                onPrimary = OnAccent,
                 background = Bg,
                 surface = Bg,
                 onSurface = Txt,
                 onBackground = Txt,
-                surfaceVariant = Color(0xFFE3E9EF),
+                surfaceVariant = Color(0xFFEAE6DA),
                 surfaceContainer = Color.White,
                 surfaceContainerHigh = Color.White,
                 secondaryContainer = Sel,
@@ -158,6 +171,8 @@ fun App(vm: MainVm = viewModel()) {
             onExternal = { openExternal(ctx, it) },
             onTune = { vm.selUrl = it.url },
             onWatched = { vm.watched(it) },
+            onDead = { vm.markDead(it) },
+            onAlive = { vm.markAlive(it) },
             onHeight = { c, h -> vm.learnHeight(c, h) },
         )
         return
@@ -189,7 +204,8 @@ fun App(vm: MainVm = viewModel()) {
 
 // ------------------------------------------------------------------ home
 
-private const val FAV = "\u0001fav"
+private const val NEW = "\u0001new"
+private const val NEW_MS = 7L * 24 * 3600 * 1000 // "recently" = the last 7 days
 
 private val TABS = listOf(Kind.LIVE to "Live", Kind.RADIO to "Radio")
 
@@ -237,13 +253,14 @@ fun HomeScreen(
         val g = ofKind.map { it.group }.distinct()
         if (sort == Sort.CATEGORY) g.sortedWith(String.CASE_INSENSITIVE_ORDER) else g
     }
-    val entries = remember(ofKind, vm.favorites, cat, query, sort, vm.plays) {
+    val entries = remember(ofKind, cat, query, sort, vm.plays, vm.seen) {
+        val cutoff = System.currentTimeMillis() - NEW_MS
         val base = ofKind.filter {
-            (cat.isEmpty() || (cat == FAV && it.url in vm.favorites) || it.group == cat) &&
+            (cat.isEmpty() || (cat == NEW && vm.addedAt(it) > cutoff) || it.group == cat) &&
                 (query.isBlank() || it.name.contains(query, ignoreCase = true))
         }
         // every sort is stable, so ties keep the playlist order
-        when (sort) {
+        if (cat == NEW) base.sortedByDescending { vm.addedAt(it) } else when (sort) {
             Sort.NUMBER -> base.sortedBy { if (it.number > 0) it.number else Int.MAX_VALUE }
             Sort.NAME -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
             Sort.CATEGORY -> base.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.group })
@@ -288,7 +305,6 @@ fun HomeScreen(
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
-                NetSpeed()
                 ClockText(Modifier.padding(horizontal = 6.dp))
                 IconBtn(
                     if (searching) Icons.Default.Close else Icons.Default.Search,
@@ -315,7 +331,7 @@ fun HomeScreen(
                         contentPadding = PaddingValues(8.dp),
                     ) {
                         item { CategoryItem("All", cat.isEmpty()) { cat = "" } }
-                        item { CategoryItem("Favorites", cat == FAV) { cat = FAV } }
+                        item { CategoryItem("Recently added", cat == NEW) { cat = NEW } }
                         items(groups, key = { it }) { g -> CategoryItem(g, cat == g) { cat = g } }
                     }
                     VDivider()
@@ -334,7 +350,7 @@ fun HomeScreen(
                         }
                         if (entries.isEmpty()) {
                             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                Text(if (cat == FAV) "No favorites here yet" else "Nothing found", color = Dim)
+                                Text(if (cat == NEW) "Nothing new in the last 7 days" else "Nothing found", color = Dim)
                             }
                         } else {
                             LazyColumn(
@@ -352,6 +368,7 @@ fun HomeScreen(
                                         subtitle = if (kind == Kind.LIVE) (cur?.title ?: "No programme info") else ch.group,
                                         progress = cur?.let { (now - it.start).toFloat() / (it.stop - it.start).coerceAtLeast(1) },
                                         fav = ch.url in vm.favorites,
+                                        dead = ch.url in vm.dead,
                                         onFocus = { if (it) vm.selUrl = ch.url },
                                         onClick = { if (sel == i) onPlay(entries, i) else vm.selUrl = ch.url },
                                         onLong = { vm.toggleFavorite(ch) },
@@ -369,6 +386,7 @@ fun HomeScreen(
                         progs = if (picked != null && kind == Kind.LIVE) vm.epg.of(picked) else emptyList(),
                         now = now,
                         fav = picked != null && picked.url in vm.favorites,
+                        dead = picked != null && picked.url in vm.dead,
                         onFav = { picked?.let { vm.toggleFavorite(it) } },
                         onOpen = { if (picked != null) onPlay(entries, entries.indexOf(picked)) },
                         modifier = Modifier.weight(0.38f).fillMaxHeight(),
@@ -494,6 +512,7 @@ private fun ListRow(
     subtitle: String,
     progress: Float?,
     fav: Boolean,
+    dead: Boolean,
     onFocus: (Boolean) -> Unit,
     onClick: () -> Unit,
     onLong: () -> Unit,
@@ -527,19 +546,24 @@ private fun ListRow(
                     ch.name,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
+                    color = if (dead) Txt.copy(alpha = 0.5f) else Txt,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
-                if (quality != null) {
+                if (dead) {
+                    Spacer(Modifier.width(8.dp))
+                    DeadBadge()
+                }
+                if (quality != null && !dead) {
                     Spacer(Modifier.width(8.dp))
                     QualityBadge(quality)
                 }
             }
             Text(
                 subtitle,
-                fontSize = 12.sp,
-                color = Dim,
+                fontSize = 11.sp,
+                color = if (dead) Dim.copy(alpha = 0.6f) else Dim,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp),
@@ -558,6 +582,7 @@ private fun Detail(
     progs: List<Programme>,
     now: Long,
     fav: Boolean,
+    dead: Boolean,
     onFav: () -> Unit,
     onOpen: () -> Unit,
     modifier: Modifier,
@@ -574,6 +599,13 @@ private fun Detail(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (dead) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                            DeadBadge()
+                            Spacer(Modifier.width(8.dp))
+                            Text("Last attempt failed", color = Dim, fontSize = 12.sp)
+                        }
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
                         if (quality != null) {
                             QualityBadge(quality)
@@ -604,39 +636,39 @@ private fun Detail(
             }
 
             if (kind == Kind.LIVE) {
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(18.dp))
                 Text(
                     "EPG DETAILS  ${ch.name}".uppercase(),
-                    fontSize = 12.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.8.sp,
                     color = Dim,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 val cur = progs.nowAt(now)
                 if (cur == null) {
-                    Text("No programme info", color = Dim, fontSize = 14.sp)
+                    Text("No programme info", color = Dim, fontSize = 12.sp)
                 } else {
-                    Text(cur.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Text("${hm(cur.start)} - ${hm(cur.stop)}", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
-                    Bar((now - cur.start).toFloat() / (cur.stop - cur.start).coerceAtLeast(1), Modifier.padding(vertical = 8.dp))
+                    Text(cur.title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${hm(cur.start)} - ${hm(cur.stop)}", color = Dim, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
+                    Bar((now - cur.start).toFloat() / (cur.stop - cur.start).coerceAtLeast(1), Modifier.padding(vertical = 6.dp))
                     if (cur.desc.isNotBlank()) {
-                        Text(cur.desc, fontSize = 13.sp, color = Txt.copy(alpha = 0.8f), maxLines = 6, overflow = TextOverflow.Ellipsis)
+                        Text(cur.desc, fontSize = 11.5.sp, color = Txt.copy(alpha = 0.8f), maxLines = 4, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                Spacer(Modifier.height(20.dp))
-                Text("UPCOMING", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp, color = Dim)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(14.dp))
+                Text("UPCOMING", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp, color = Dim)
+                Spacer(Modifier.height(6.dp))
                 val next = progs.upcoming(now, 6)
                 if (next.isEmpty()) {
-                    Text("No upcoming programmes", color = Dim, fontSize = 14.sp)
+                    Text("No upcoming programmes", color = Dim, fontSize = 12.sp)
                 } else {
                     for (p in next) {
-                        Row(Modifier.padding(vertical = 4.dp)) {
-                            Text(hm(p.start), color = Dim, fontSize = 13.sp, modifier = Modifier.width(52.dp))
-                            Text(p.title, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Row(Modifier.padding(vertical = 3.dp)) {
+                            Text(hm(p.start), color = Dim, fontSize = 11.5.sp, modifier = Modifier.width(48.dp))
+                            Text(p.title, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }

@@ -72,6 +72,10 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     var heights by mutableStateOf(store.heights())
         private set
+    var seen by mutableStateOf(store.seen())
+        private set
+    var dead by mutableStateOf(store.dead())
+        private set
 
     var epg by mutableStateOf(EpgIndex.EMPTY)
         private set
@@ -168,7 +172,49 @@ class MainVm(app: Application) : AndroidViewModel(app) {
             acc
         }
         channels = all
+        noteSeen(all)
         loadEpgCache()
+    }
+
+    // ---- recently added ----
+
+    private fun seenKey(url: String): String = Integer.toString(url.hashCode(), 36)
+
+    /** Time this channel first appeared; 0 if it was there from the start. */
+    fun addedAt(c: Channel): Long = seen[seenKey(c.url)] ?: 0L
+
+    private fun noteSeen(all: List<Channel>) {
+        if (all.isEmpty()) return
+        val baseline = seen.isEmpty() // very first load: nothing counts as "new"
+        val now = System.currentTimeMillis()
+        val keep = HashMap<String, Long>()
+        for (c in all) {
+            val k = seenKey(c.url)
+            keep[k] = seen[k] ?: if (baseline) 0L else now
+        }
+        if (keep != seen) {
+            seen = keep
+            store.saveSeen(keep)
+        }
+    }
+
+    // ---- dead channels ----
+
+    fun markDead(c: Channel) {
+        if (c.url in dead) return
+        dead = dead + c.url
+        store.saveDead(dead)
+    }
+
+    fun markAlive(c: Channel) {
+        if (c.url !in dead) return
+        dead = dead - c.url
+        store.saveDead(dead)
+    }
+
+    fun clearDead() {
+        dead = emptySet()
+        store.saveDead(dead)
     }
 
     // ---- programme guide (EPG) ----
